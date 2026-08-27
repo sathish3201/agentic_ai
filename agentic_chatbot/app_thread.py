@@ -13,6 +13,20 @@ def add_thread(thread_id):
     if thread_id not in st.session_state['chat_threads']:
         st.session_state['chat_threads'].append(thread_id)
 
+
+def get_thread_title(thread_id):
+    """Return a display title for a thread, falling back to its ID."""
+    return st.session_state['thread_titles'].get(thread_id, thread_id)
+
+
+def set_thread_title_from_message(thread_id, message):
+    """Derive a short chat title from the first user message, once."""
+    if thread_id not in st.session_state['thread_titles']:
+        title = message.strip().splitlines()[0]
+        if len(title) > 40:
+            title = title[:40].rstrip() + "..."
+        st.session_state['thread_titles'][thread_id] = title
+
 #reset 
 def reset_chat():
     """Reset the chat"""
@@ -39,7 +53,11 @@ if 'message_history' not in st.session_state:
 #list of thread ids
 if 'chat_threads' not in st.session_state:
     st.session_state['chat_threads']= []
-    
+
+#thread_id -> display title
+if 'thread_titles' not in st.session_state:
+    st.session_state['thread_titles'] = {}
+
 if 'thread_id' not in st.session_state:
     st.session_state['thread_id'] = generate_thread_id()
     # add_thread(st.session_state['thread_id'])
@@ -65,7 +83,7 @@ if st.sidebar.button("New Chat"):
 for thread_id in st.session_state['chat_threads'][::-1]:
 
     #CREATE ONE SIDE BAR FOR EVERY CONVERASATION
-    if st.sidebar.button(thread_id, key=thread_id):
+    if st.sidebar.button(get_thread_title(thread_id), key=thread_id):
         
         # SET SELECTED THREAD AS THE CURRENT THREAD
         st.session_state['thread_id'] = thread_id
@@ -105,6 +123,7 @@ for message in st.session_state['message_history']:
 user_input= st.chat_input('Type Here')
 #processing user input
 if user_input:
+    set_thread_title_from_message(st.session_state['thread_id'], user_input)
     st.session_state['message_history'].append({'role':'user', 'content': user_input})
 
     # display the user message in the chat interface
