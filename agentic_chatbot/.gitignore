@@ -4,3 +4,6 @@ __pycache__/
 venv/
 .venv/
 *.ipynb
+*.db
+*.db-shm
+*.db-wal
