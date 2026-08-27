@@ -46,6 +46,23 @@ def load_conversations(thread_id):
 
 st.title("Agentic AI ChatBot with Langgraph")
 
+# ============ CHATGPT-STYLE ALIGNMENT (user: right, assistant: left) =========
+st.markdown(
+    """
+    <style>
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
+        flex-direction: row-reverse;
+        text-align: right;
+    }
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"])
+        div[data-testid="stChatMessageContent"] {
+        text-align: right;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 #loading message history from previous conversations
 if 'message_history' not in st.session_state:
     st.session_state['message_history']= []
@@ -157,7 +174,10 @@ if user_input:
             )
         #save complete assistant response in streamlit session
     st.session_state['message_history'].append({'role':'assistant', 'content': ai_message})
-    
+
+    #rerun so the sidebar picks up the newly derived thread title
+    st.rerun()
+
     # response = chatbot.invoke({"messages":[HumanMessage(content=user_input)]}, config = CONFIG)
 
     # # print('AI: ',response['messages'][-1].content)
