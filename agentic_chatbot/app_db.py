@@ -14,18 +14,30 @@ def add_thread(thread_id):
         st.session_state['chat_threads'].append(thread_id)
 
 
+def _make_title(text):
+    """Trim a message down to a short, sidebar-friendly title."""
+    title = text.strip().splitlines()[0]
+    if len(title) > 40:
+        title = title[:40].rstrip() + "..."
+    return title
+
+
 def get_thread_title(thread_id):
-    """Return a display title for a thread, falling back to its ID."""
-    return st.session_state['thread_titles'].get(thread_id, thread_id)
+    """Return a display title for a thread, deriving it from the thread's
+    first stored user message (and caching it) if not already known."""
+    titles = st.session_state['thread_titles']
+    if thread_id not in titles:
+        for message in load_conversations(thread_id):
+            if isinstance(message, HumanMessage) and message.content:
+                titles[thread_id] = _make_title(message.content)
+                break
+    return titles.get(thread_id, thread_id)
 
 
 def set_thread_title_from_message(thread_id, message):
     """Derive a short chat title from the first user message, once."""
     if thread_id not in st.session_state['thread_titles']:
-        title = message.strip().splitlines()[0]
-        if len(title) > 40:
-            title = title[:40].rstrip() + "..."
-        st.session_state['thread_titles'][thread_id] = title
+        st.session_state['thread_titles'][thread_id] = _make_title(message)
 
 #reset 
 def reset_chat():
@@ -150,7 +162,10 @@ if user_input:
 
     #pass current thread it to  langgraph
     # langraph use this id to save and retrieve the messages from the state
-    CONFIG = {'configurable': {'thread_id': st.session_state['thread_id']}}
+    CONFIG = {"configurable": {'thread_id': st.session_state['thread_id']},
+        "metadata":{'thread_id': st.session_state['thread_id']},
+        "run_name":'chat_trace'
+        }
     
     #processing AI response
     with st.chat_message('assistant'):

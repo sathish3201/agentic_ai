@@ -15,15 +15,6 @@ load_dotenv()
 
 
 llm = None
-def laptop_model():
-    try:
-        llm = ChatOllama(model="qwen2.5:3b", temperature=0.3)
-        # response = llm.invoke("Hello, check if you are active.")
-        # print("Ollama is available. Response:")
-        # print(response.content)
-    except Exception as e:
-        print("Could not connect to Ollama. Make sure Ollama app is running on your machine:", e)
-    return llm
 
 
 def laptop_model():

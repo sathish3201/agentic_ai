@@ -19,20 +19,10 @@ llm = None
 def laptop_model():
     try:
         llm = ChatOllama(model="qwen2.5:3b", temperature=0.3)
-        # response = llm.invoke("Hello, check if you are active.")
-        # print("Ollama is available. Response:")
-        # print(response.content)
-    except Exception as e:
-        print("Could not connect to Ollama. Make sure Ollama app is running on your machine:", e)
-    return llm
-
-
-def laptop_model():
-    try:
-        llm = ChatOllama(model="qwen2.5:3b", temperature=0.3)
-        # response = llm.invoke("Hello, check if you are active.")
-        # print("Ollama is available. Response:")
-        # print(response.content)
+        # a real call is needed to confirm Ollama is actually reachable —
+        # constructing ChatOllama never fails on its own, even if Ollama
+        # isn't running
+        llm.invoke("ping")
         return llm
     except Exception as e:
         print("Could not connect to Ollama. Make sure Ollama app is running on your machine:", e)
@@ -53,9 +43,8 @@ def online_model():
         print("Could not connect to OpenAI. Make sure OpenAI app is running on your machine:", e)
     return None
 
-if os.environ.get("USE_LOCAL_MODEL", "false").lower() == "true":
-    llm = laptop_model()
-else:
+llm = laptop_model()
+if llm is None:
     llm = online_model()
 
 if llm == None:
