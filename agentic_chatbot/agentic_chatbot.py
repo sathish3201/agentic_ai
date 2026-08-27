@@ -52,10 +52,10 @@ def online_model():
         print("Could not connect to OpenAI. Make sure OpenAI app is running on your machine:", e)
     return None
 
-if laptop_model():
-    llm= laptop_model()
+if os.environ.get("USE_LOCAL_MODEL", "false").lower() == "true":
+    llm = laptop_model()
 else:
-    llm= online_model()
+    llm = online_model()
 
 if llm == None:
     print("No model is available. Closing...")
