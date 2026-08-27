@@ -40,47 +40,54 @@ flowchart LR
   internet via a static ngrok domain. The deployed app therefore only answers
   while the local machine, Ollama, and the ngrok tunnel are all running.
 
-## Day-by-day log
+## Build stages
 
-### 2026-08-26 — Initial chatbot + graph
-- `53cb5aa` Added the first version of the chatbot: a LangGraph single-node
-  graph (`chat_node`) wired to either a local Ollama model or an OpenAI-compatible
-  endpoint, plus a first Streamlit app.
+The project was built up in four stages, each adding one capability on top
+of the last.
 
-### 2026-08-27 — Threading, deployment, and streaming fixes
-- `25741d3` Split the app into `app_simple.py` and `app_thread.py` (per-thread
-  conversations with a sidebar), added `requirements.txt` and a scoped
-  `.gitignore` for the module.
-- `40ee246` Fixed model selection for deployment: `ChatOllama(...)` never
-  raised on construction, so the app always picked the local model and never
-  fell back to the online endpoint. Gated selection behind `USE_LOCAL_MODEL`.
-  Filled in the real `langgraph`/`langchain` dependencies in
-  `requirements.txt` (previously only `streamlit` was listed).
-- Deployed to **Render** as a web service (`agentic-chatbot`,
+### 1. Core chatbot on LangGraph
+- `53cb5aa` First version: a single-node LangGraph graph (`chat_node`) that
+  takes the conversation state, invokes an LLM (local Ollama or an
+  OpenAI-compatible endpoint via `ChatOpenAI`), and appends the response.
+  No UI yet — just the graph definition.
+
+### 2. Persistent (short-term) memory via checkpointing
+- Added a `MemorySaver` checkpointer so the graph remembers prior turns
+  within a `thread_id` — the graph looks up state by thread and appends new
+  messages rather than starting fresh each call.
+- `25741d3` Introduced multiple conversation threads: `app_thread.py` lets a
+  user switch between threads, each with its own `thread_id` and isolated
+  message history (still in-memory — lost on restart).
+
+### 3. User interface (Streamlit)
+- Built the Streamlit UI on top of the graph: chat bubbles, a text input,
+  and a sidebar listing all threads with a "New Chat" button
+  (`app_simple.py` → `app_thread.py`).
+- `40ee246` Made the app deployable: fixed model selection (`ChatOllama`
+  construction never actually failed, so it never fell back to the online
+  model — gated behind `USE_LOCAL_MODEL`) and filled in the real
+  `langgraph`/`langchain` dependencies in `requirements.txt`.
+- Deployed to **Render** (`agentic-chatbot`,
   `https://agentic-chatbot-wah3.onrender.com`), running
   `streamlit run agentic_chatbot/app_thread.py`.
-- `a6f2a09` Diagnosed a production crash — `ValueError: No generations found
-  in stream` — traced to the local `ollama-service` wrapper always returning
-  a single JSON body regardless of the `stream` flag, which broke
-  `ChatOpenAI`'s SSE parser. Temporarily disabled streaming as a hotfix.
-- Implemented **real SSE streaming** in `ollama-service/app.py`: proxies
-  Ollama's own streamed `/api/chat` response, converts each chunk into
-  OpenAI-style `data: {...}` deltas, and terminates with `data: [DONE]`;
-  cached answers are replayed as a single-chunk stream.
-- `b58189f` Re-enabled streaming in `agentic_chatbot.py` now that the backend
-  genuinely supports it; verified end-to-end with a live curl test against
-  the ngrok URL.
-- `18b2ecc` Sidebar showed raw thread UUIDs — added `thread_titles`, deriving
-  a short title from each thread's first user message.
-- `0d0fc17` Fixed the title not refreshing until an unrelated rerun (missing
-  `st.rerun()` after the assistant reply), and added ChatGPT-style message
-  alignment (user messages right-aligned with the avatar on the right,
-  assistant messages left-aligned) via CSS targeting Streamlit's
+- `a6f2a09` → **streaming fix**: hit `ValueError: No generations found in
+  stream` in production — the local `ollama-service` wrapper always
+  returned one flat JSON body regardless of the `stream` flag, breaking
+  `ChatOpenAI`'s SSE parser. Implemented real SSE streaming in
+  `ollama-service/app.py` (proxies Ollama's streamed response as OpenAI-style
+  `data: {...}` chunks), then `b58189f` re-enabled streaming in the client.
+- `18b2ecc` / `0d0fc17` → UI polish: derived a short chat title from each
+  thread's first message instead of showing the raw UUID in the sidebar
+  (with a `st.rerun()` fix so it refreshes promptly), and added ChatGPT-style
+  message alignment (user right, assistant left) via CSS on Streamlit's
   `data-testid` hooks.
-- Added a **SQLite-backed variant** (`agentic_chatbot_db.py`, `app_db.py`)
-  using `SqliteSaver` so conversation history survives app/server restarts,
-  with `get_all_threads()` populating the sidebar from the database instead
-  of only the current session.
+
+### 4. Long-term memory via SQLite
+- Added `agentic_chatbot_db.py` and `app_db.py`, swapping `MemorySaver` for
+  `SqliteSaver` against `chatbot.db`. Conversation state now survives app and
+  server restarts, and `get_all_threads()` reads every known thread straight
+  from the database to populate the sidebar — not just threads created in
+  the current session.
 
 ## Tests performed
 
