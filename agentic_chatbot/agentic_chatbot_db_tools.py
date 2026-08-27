@@ -195,11 +195,47 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
+STYLE_PROMPT = SystemMessage(content=(
+    "When the user asks you to explain, describe, or write about a topic "
+    "(e.g. \"what is python\", \"write about X\", \"explain how Y works\"), "
+    "format the answer in Markdown so it's easy to scan — not one dense "
+    "paragraph. Pick whichever of these fits the content, and mix them "
+    "when the answer has multiple kinds of information:\n"
+    "- **Bold headings** to split the answer into sections.\n"
+    "- Bullet points (\"- \") for a list of facts/features, one idea per line.\n"
+    "- Numbered lists (\"1. \", \"2. \") for sequential steps or ranked items.\n"
+    "- Fenced code blocks (```) for any code, commands, or file contents.\n"
+    "- `inline code` for keywords, function names, file names, or short snippets.\n"
+    "- A short Markdown table when comparing a few items across attributes.\n"
+    "- **Bold** or *italic* for emphasis on a key term, not whole sentences.\n"
+    "- A relevant emoji next to a heading is fine; don't put emojis on every line.\n\n"
+    "Example, for \"what is python\":\n"
+    "**What is Python?** 🐍\n"
+    "- High-level, general-purpose programming language\n"
+    "- Created by Guido van Rossum, first released in 1991\n"
+    "- Known for readable, indentation-based syntax\n\n"
+    "**A simple example**\n"
+    "```python\n"
+    "print(\"hello world\")\n"
+    "```\n\n"
+    "**What it's used for**\n"
+    "1. Web development (Django, Flask)\n"
+    "2. Data science and AI (pandas, PyTorch)\n"
+    "3. Automation and scripting\n\n"
+    "Do NOT use headings/bullets/tables/code blocks for:\n"
+    "- Greetings / small talk (e.g. \"hi\", \"hello\", \"thanks\", \"how are you\") "
+    "— reply with a short plain sentence, like a normal chat message.\n"
+    "- Calculations or single-fact lookups (e.g. \"what is 2+2\", \"what's the "
+    "weather in X\", a stock price) — answer directly in one plain line, "
+    "e.g. \"25 * 4 = 100\", not \"- 25 * 4 = 100\"."
+))
+
+
 def chat_node(state:ChatState):
     # take user query from state
     messages = state['messages']
-    #send to llm
-    response = llm_with_tools.invoke(messages)
+    #send to llm, with a style instruction prepended so replies stay scannable
+    response = llm_with_tools.invoke([STYLE_PROMPT] + messages)
     #response to store state
     return {'messages': [response]}
 
