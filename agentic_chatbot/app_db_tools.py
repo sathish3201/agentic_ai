@@ -58,14 +58,78 @@ def load_conversations(thread_id):
     return state.values.get("messages", [])
 
 
-st.set_page_config(page_title="Agentic AI ChatBot", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="Agentic AI ChatBot", page_icon="🤖", layout="wide")
 
-st.title("🤖 Agentic AI ChatBot with LangGraph")
-
-# ============ CHATGPT-STYLE ALIGNMENT + BUBBLE STYLING =========
+# ============ LAYOUT + STYLING ===============================================
 st.markdown(
     """
     <style>
+    /* ---- overall canvas: give the chat room to breathe, cap it at a
+       comfortable reading width, and keep it centered instead of pinned
+       to a cramped 700px column or stretched edge-to-edge ---- */
+    .block-container {
+        max-width: 880px;
+        margin: 0 auto;
+        padding-top: 2rem;
+        padding-bottom: 6rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+
+    /* ---- header ---- */
+    .app-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.25rem;
+    }
+    .app-header .icon {
+        font-size: 2rem;
+        line-height: 1;
+    }
+    .app-header h1 {
+        font-size: 1.6rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    .app-subtitle {
+        color: #6B7280;
+        font-size: 0.95rem;
+        margin: 0 0 1.75rem 0;
+    }
+
+    /* ---- sidebar: wider, padded, visually separated ---- */
+    section[data-testid="stSidebar"] {
+        min-width: 300px;
+        background: #FAFAFC;
+        border-right: 1px solid #ECECF1;
+    }
+    section[data-testid="stSidebar"] > div {
+        padding: 1.5rem 1rem;
+    }
+    section[data-testid="stSidebar"] h1 {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+    }
+    section[data-testid="stSidebar"] button {
+        border-radius: 10px;
+        width: 100%;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    section[data-testid="stSidebar"] .stButton {
+        margin-bottom: 0.4rem;
+    }
+
+    /* ---- chat messages: more vertical breathing room between turns ---- */
+    div[data-testid="stChatMessage"] {
+        margin-bottom: 1.1rem;
+        gap: 0.75rem;
+    }
+
     /* user messages: right-aligned, avatar on the right, blue bubble */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
         flex-direction: row-reverse;
@@ -74,35 +138,52 @@ st.markdown(
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"])
         div[data-testid="stChatMessageContent"] {
         text-align: right;
+        display: flex;
+        justify-content: flex-end;
     }
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"])
         div[data-testid="stChatMessageContent"] > div {
-        background: #DCF0FF;
-        border-radius: 16px 16px 4px 16px;
-        padding: 10px 14px;
+        background: #DBEAFE;
+        border-radius: 18px 18px 4px 18px;
+        padding: 0.7rem 1rem;
         display: inline-block;
+        max-width: 85%;
+        text-align: left;
     }
 
     /* assistant messages: soft grey bubble, rounded on the left */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"])
         div[data-testid="stChatMessageContent"] > div {
-        background: #F4F4F6;
-        border-radius: 16px 16px 16px 4px;
-        padding: 10px 14px;
+        background: #F3F4F6;
+        border-radius: 18px 18px 18px 4px;
+        padding: 0.7rem 1rem;
         display: inline-block;
+        max-width: 85%;
     }
 
-    /* sidebar: tighter, cleaner thread rows */
-    section[data-testid="stSidebar"] button {
-        border-radius: 10px;
-    }
-
-    /* status/"thinking" box: rounded card instead of the plain default box */
+    /* ---- "thinking / tool status" card ---- */
     div[data-testid="stExpander"] {
         border-radius: 12px;
         border: 1px solid #E6E6EA;
+        background: #FCFCFD;
+    }
+
+    /* ---- chat input: wider, more padding, sits nicely above the fold ---- */
+    div[data-testid="stChatInput"] textarea {
+        border-radius: 14px;
     }
     </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="app-header">
+        <span class="icon">🤖</span>
+        <h1>Agentic AI ChatBot</h1>
+    </div>
+    <p class="app-subtitle">Built with LangGraph · web search, calculator, stock &amp; weather tools</p>
     """,
     unsafe_allow_html=True,
 )
@@ -129,9 +210,9 @@ add_thread(st.session_state['thread_id'])
 
 # ======= sidebar  threading feature title ==============================
 
-st.sidebar.title("My Conversations")
+st.sidebar.title("💬 My Conversations")
 
-if st.sidebar.button("New Chat"):
+if st.sidebar.button("➕ New Chat", use_container_width=True):
 
     #reset the current chat and create a new thread
     reset_chat()
@@ -139,15 +220,20 @@ if st.sidebar.button("New Chat"):
     #rerun the streamlit app to update the interface
     st.rerun()
 
+st.sidebar.markdown("<div style='margin-bottom:0.75rem'></div>", unsafe_allow_html=True)
+
 
 # =============DISPLAYING ALL CONVERSATIONS IN REVERSE ORDER ======
 for thread_id in st.session_state['chat_threads'][::-1]:
 
+    is_active = thread_id == st.session_state['thread_id']
+
     #ONE ROW PER CONVERSATION: select button + delete button
-    col_select, col_delete = st.sidebar.columns([5, 1])
+    col_select, col_delete = st.sidebar.columns([6, 1], gap="small")
 
     with col_select:
-        if st.button(get_thread_title(thread_id), key=thread_id):
+        label = ("🟢 " if is_active else "") + get_thread_title(thread_id)
+        if st.button(label, key=thread_id, use_container_width=True):
 
             # SET SELECTED THREAD AS THE CURRENT THREAD
             st.session_state['thread_id'] = thread_id
@@ -204,7 +290,7 @@ if user_input:
 
     # display the user message in the chat interface
     with st.chat_message('user'):
-        st.text(user_input)
+        st.markdown(user_input)
 
 
     #pass current thread it to  langgraph
