@@ -5,3 +5,5 @@ langchain-openai==1.5.2
 langchain-ollama==1.1.0
 python-dotenv==1.2.2
 langgraph-checkpoint-sqlite==3.1.1
+langchain-tavily==0.2.18
+requests==2.34.2
