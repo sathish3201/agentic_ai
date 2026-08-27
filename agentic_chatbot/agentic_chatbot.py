@@ -6,11 +6,60 @@ from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph.graph.message import add_messages
+import os
+from langchain_openai import ChatOpenAI
+
 
 load_dotenv()
 
 
-llm = ChatOllama(model="qwen2.5:3b", temperature="0.3")
+
+llm = None
+def laptop_model():
+    try:
+        llm = ChatOllama(model="qwen2.5:3b", temperature=0.3)
+        # response = llm.invoke("Hello, check if you are active.")
+        # print("Ollama is available. Response:")
+        # print(response.content)
+    except Exception as e:
+        print("Could not connect to Ollama. Make sure Ollama app is running on your machine:", e)
+    return llm
+
+
+def laptop_model():
+    try:
+        llm = ChatOllama(model="qwen2.5:3b", temperature=0.3)
+        # response = llm.invoke("Hello, check if you are active.")
+        # print("Ollama is available. Response:")
+        # print(response.content)
+        return llm
+    except Exception as e:
+        print("Could not connect to Ollama. Make sure Ollama app is running on your machine:", e)
+    return None
+
+
+# llm = ChatOllama(model="qwen2.5:3b", temperature="0.3")
+def online_model():
+    try:
+        llm = ChatOpenAI(
+            base_url=os.environ["LOCAL_MODEL_URL"] + "/v1",
+            api_key=os.environ["LOCAL_MODEL_API_KEY"],
+            model=os.environ["LOCAL_MODEL_NAME"],
+            temperature=0.3,
+        )
+        return llm
+    except Exception as e:
+        print("Could not connect to OpenAI. Make sure OpenAI app is running on your machine:", e)
+    return None
+
+if laptop_model():
+    llm= laptop_model()
+else:
+    llm= online_model()
+
+if llm == None:
+    print("No model is available. Closing...")
+    exit(1)
 
 # creating state
 
