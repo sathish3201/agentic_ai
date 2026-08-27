@@ -46,7 +46,6 @@ def online_model():
             api_key=os.environ["LOCAL_MODEL_API_KEY"],
             model=os.environ["LOCAL_MODEL_NAME"],
             temperature=0.3,
-            streaming=False,
         )
         return llm
     except Exception as e:
