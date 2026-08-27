@@ -66,14 +66,26 @@ st.markdown(
     <style>
     /* ---- overall canvas: give the chat room to breathe, cap it at a
        comfortable reading width, and keep it centered instead of pinned
-       to a cramped 700px column or stretched edge-to-edge ---- */
+       to a cramped 700px column or stretched edge-to-edge.
+       Uses clamp() so it scales down smoothly on narrower windows
+       instead of snapping between fixed breakpoints. ---- */
     .block-container {
-        max-width: 880px;
+        max-width: min(880px, 92vw);
         margin: 0 auto;
-        padding-top: 2rem;
+        padding-top: clamp(1rem, 3vw, 2rem);
         padding-bottom: 6rem;
-        padding-left: 2rem;
-        padding-right: 2rem;
+        padding-left: clamp(0.75rem, 3vw, 2rem);
+        padding-right: clamp(0.75rem, 3vw, 2rem);
+    }
+
+    /* small screens: sidebar overlays instead of splitting the viewport,
+       so the chat column keeps a usable width on phones/tablets */
+    @media (max-width: 640px) {
+        .block-container {
+            max-width: 100vw;
+            padding-left: 0.75rem;
+            padding-right: 0.75rem;
+        }
     }
 
     /* ---- header ---- */
@@ -128,37 +140,60 @@ st.markdown(
     div[data-testid="stChatMessage"] {
         margin-bottom: 1.1rem;
         gap: 0.75rem;
+        max-width: 100%;
+    }
+
+    /* Streamlit nests the actual text several levels deep inside its own
+       auto-layout wrappers (stChatMessageContent > stVerticalBlockBorderWrapper
+       > ... > stMarkdown). Those inner wrappers shrink-wrap to their own
+       content, which is what made the bubble collapse to a narrow column
+       instead of using the free width of the row. Forcing every wrapper in
+       that chain to 100% width lets the outer bubble (stMarkdownContainer)
+       be the only thing that controls sizing. */
+    div[data-testid="stChatMessageContent"] div[data-testid="stVerticalBlockBorderWrapper"],
+    div[data-testid="stChatMessageContent"] div[data-testid="stVerticalBlock"],
+    div[data-testid="stChatMessageContent"] div[data-testid="element-container"],
+    div[data-testid="stChatMessageContent"] div[data-testid="stMarkdown"] {
+        width: 100% !important;
+        max-width: 100% !important;
     }
 
     /* user messages: right-aligned, avatar on the right, blue bubble */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
         flex-direction: row-reverse;
-        text-align: right;
     }
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"])
         div[data-testid="stChatMessageContent"] {
-        text-align: right;
         display: flex;
         justify-content: flex-end;
+        flex: 1 1 auto;
+        min-width: 0;
     }
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"])
-        div[data-testid="stChatMessageContent"] > div {
+        div[data-testid="stMarkdownContainer"] {
         background: #DBEAFE;
         border-radius: 18px 18px 4px 18px;
         padding: 0.7rem 1rem;
-        display: inline-block;
-        max-width: 85%;
+        max-width: clamp(240px, 85%, 640px);
+        width: fit-content;
         text-align: left;
     }
 
     /* assistant messages: soft grey bubble, rounded on the left */
     div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"])
-        div[data-testid="stChatMessageContent"] > div {
+        div[data-testid="stChatMessageContent"] {
+        display: flex;
+        justify-content: flex-start;
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+    div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"])
+        div[data-testid="stMarkdownContainer"] {
         background: #F3F4F6;
         border-radius: 18px 18px 18px 4px;
         padding: 0.7rem 1rem;
-        display: inline-block;
-        max-width: 85%;
+        max-width: clamp(240px, 85%, 640px);
+        width: fit-content;
     }
 
     /* ---- "thinking / tool status" card ---- */
