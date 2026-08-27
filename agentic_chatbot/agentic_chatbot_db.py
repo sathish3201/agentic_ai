@@ -90,6 +90,13 @@ def get_all_threads():
     return list(all_threads)
 
 
+def delete_thread(thread_id):
+    """Permanently remove a thread's checkpoints and pending writes."""
+    conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+    conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+    conn.commit()
+
+
 # thread_id = "1"
 # initial_state = {
 #     "messages" :[

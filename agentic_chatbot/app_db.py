@@ -1,4 +1,4 @@
-from agentic_chatbot_db import chatbot, get_all_threads
+from agentic_chatbot_db import chatbot, get_all_threads, delete_thread
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 import streamlit as st
 import uuid
@@ -111,31 +111,46 @@ if st.sidebar.button("New Chat"):
 # =============DISPLAYING ALL CONVERSATIONS IN REVERSE ORDER ======
 for thread_id in st.session_state['chat_threads'][::-1]:
 
-    #CREATE ONE SIDE BAR FOR EVERY CONVERASATION
-    if st.sidebar.button(get_thread_title(thread_id), key=thread_id):
-        
-        # SET SELECTED THREAD AS THE CURRENT THREAD
-        st.session_state['thread_id'] = thread_id
+    #ONE ROW PER CONVERSATION: select button + delete button
+    col_select, col_delete = st.sidebar.columns([5, 1])
 
-        # load messages SAVED UNDER THE SELECTED THREAD
-        messages = load_conversations(thread_id)
-        temp_messages = []
-        for message in messages:
-            # check whether message sent by user
-            if isinstance(message, HumanMessage):
-                role = 'user'
+    with col_select:
+        if st.button(get_thread_title(thread_id), key=thread_id):
 
-            elif isinstance(message, AIMessage):
-                role = 'assistant'
-            # ignore other message types, such as ToolMessage
-            else:
-                continue
-            temp_messages.append({'role': role, 'content': message.content})
-        # save the conversation to session state
-        # st.session_state[f'thread_{thread_id}'] = temp_messages
-        st.session_state['message_history'] = temp_messages
-        #RERUN THE APPLICATION TO DISPALY THE LOADED MESSAGES
-        st.rerun()
+            # SET SELECTED THREAD AS THE CURRENT THREAD
+            st.session_state['thread_id'] = thread_id
+
+            # load messages SAVED UNDER THE SELECTED THREAD
+            messages = load_conversations(thread_id)
+            temp_messages = []
+            for message in messages:
+                # check whether message sent by user
+                if isinstance(message, HumanMessage):
+                    role = 'user'
+
+                elif isinstance(message, AIMessage):
+                    role = 'assistant'
+                # ignore other message types, such as ToolMessage
+                else:
+                    continue
+                temp_messages.append({'role': role, 'content': message.content})
+            # save the conversation to session state
+            # st.session_state[f'thread_{thread_id}'] = temp_messages
+            st.session_state['message_history'] = temp_messages
+            #RERUN THE APPLICATION TO DISPALY THE LOADED MESSAGES
+            st.rerun()
+
+    with col_delete:
+        if st.button("🗑️", key=f"delete_{thread_id}"):
+            delete_thread(thread_id)
+            st.session_state['chat_threads'].remove(thread_id)
+            st.session_state['thread_titles'].pop(thread_id, None)
+
+            # if the deleted thread was active, switch to a fresh new chat
+            if st.session_state['thread_id'] == thread_id:
+                reset_chat()
+
+            st.rerun()
 
 # ===========================MAIN CHAT INTERFACE ==================
 
