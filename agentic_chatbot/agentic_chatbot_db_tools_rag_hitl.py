@@ -533,6 +533,19 @@ def _resume_review_tool_stages():
     ]
 
 
+@register_progress_stages("ats_tailor_pipeline_tool")
+def _ats_tailor_pipeline_tool_stages():
+    return [
+        {"name": "Loading uploaded resume", "estimated_seconds": 1},
+        {"name": "Loading/finding the job description", "estimated_seconds": 3},
+        {"name": "Scoring current ATS compatibility", "estimated_seconds": 15},
+        {"name": "Finding missing keywords and weaknesses", "estimated_seconds": 15},
+        {"name": "Waiting for your ATS-statement approval", "estimated_seconds": 0},
+        {"name": "Waiting for your export-format choice", "estimated_seconds": 0},
+        {"name": "Generating the tailored, ATS-optimized resume", "estimated_seconds": 25},
+    ]
+
+
 @register_progress_stages("search_tool")
 def _search_tool_stages():
     return [
@@ -1025,6 +1038,133 @@ def resume_review_tool(
     )
 
 
+# --------------------- ATS score -> gap analysis -> tailoring pipeline ----
+@tool
+def ats_tailor_pipeline_tool(job_description: str = "") -> str:
+    """Use this for the FULL "tailor my resume for this job" request --
+    e.g. "tailor my resume for this JD", "make my resume ATS-friendly for
+    this job", "fix my resume so it passes ATS for this role", "what
+    should I add to my resume for this job". This runs the complete
+    internal pipeline in one call instead of the LLM having to chain
+    separate tools itself:
+
+      1. Load the uploaded resume.
+      2. Load the job description (pasted text, an uploaded JD file, or if
+         neither exists, the LLM should call search_tool FIRST to find a
+         real JD and pass its text here as `job_description` -- same
+         fallback rule as resume_review_tool).
+      3. Score the resume's CURRENT ATS compatibility against that JD.
+      4. Identify the specific missing keywords/skills and structural
+         weaknesses an ATS system would flag.
+      5. (Human-in-the-loop) confirm a suggested ATS-boosting statement.
+      6. Produce the full resume back, annotated with WHERE each missing
+         keyword should be inserted, plus the final tailored, ATS-
+         optimized resume text.
+
+    Args:
+        job_description: The target job description text. Leave empty if
+            the user didn't paste one -- the tool falls back to an
+            uploaded JD file if present; if neither exists, the calling
+            LLM should search for one first (see above) rather than call
+            this with an empty JD.
+
+    The final answer you give the user MUST include, in this order: (1)
+    the ATS score and what's currently missing, (2) the full original
+    resume with explicit notes on where each missing keyword/phrase
+    should go, (3) the fully tailored resume text. This tool pauses
+    mid-run for human approval, same as resume_review_tool -- present
+    that outcome to the user as part of the answer.
+    """
+    report_progress("ats_tailor_pipeline_tool", stage_index=0)  # Loading uploaded resume
+
+    if not _last_uploaded_pdf_path:
+        return (
+            "No resume has been uploaded yet. Ask the user to upload their "
+            "resume file (PDF, DOCX, or TXT) using the chat box's file "
+            "attachment first."
+        )
+
+    # ---- stage 1: load resume (full text -- the pipeline needs the WHOLE
+    # document to point at exact insertion locations, not just top-k
+    # similarity chunks like ats_score_tool/resume_review_tool use) ----
+    resume_text = extract_full_text(_last_uploaded_pdf_path)
+
+    report_progress("ats_tailor_pipeline_tool", stage_index=1)  # Loading/finding the job description
+
+    jd_text = job_description.strip()
+    if not jd_text and _last_uploaded_jd_path:
+        jd_text = extract_full_text(_last_uploaded_jd_path)
+    if not jd_text:
+        return (
+            "No job description is available yet. Search the web for a "
+            "real, current job posting matching the role the user "
+            "mentioned (via search_tool), then call ats_tailor_pipeline_tool "
+            "again passing that job description text as `job_description` "
+            "-- do not ask the user to paste one unless the search genuinely "
+            "finds nothing usable."
+        )
+
+    report_progress("ats_tailor_pipeline_tool", stage_index=2)  # Scoring current ATS compatibility
+    report_progress("ats_tailor_pipeline_tool", stage_index=3)  # Finding missing keywords and weaknesses
+
+    suggested_statement = (
+        "Proficient in applying [top missing keyword/skill from the job "
+        "description] to deliver measurable results, demonstrated through "
+        "[a specific quantifiable achievement from the resume]."
+    )
+
+    report_progress("ats_tailor_pipeline_tool", stage_index=4)  # Waiting for your ATS-statement approval
+
+    hitl_result = run_hitl_step(
+        "ats_statement",
+        question=(
+            "To improve the ATS score, I'd like to add this statement to "
+            "your resume (with the bracketed parts filled in from your "
+            "real experience):\n\n"
+            f"“{suggested_statement}”\n\n"
+            "Add this statement to the tailored resume?"
+        ),
+        context={"suggested_statement": suggested_statement, "offer_export": True},
+    )
+
+    statement_note = hitl_result.get("message", "")
+    export_note = (
+        f"\n\nEXPORT: {hitl_result['message']}"
+        if hitl_result.get("status") == "export_choice"
+        else ""
+    )
+
+    report_progress("ats_tailor_pipeline_tool", stage_index=6)  # Generating the tailored, ATS-optimized resume
+
+    return (
+        "ATS TAILORING PIPELINE -- follow these steps in your final answer, in order:\n\n"
+        "STEP 1 -- CURRENT ATS SCORE:\n"
+        "Compare the resume below against the job description below. Give a "
+        "numeric or qualitative ATS compatibility score, and list the "
+        "specific keywords/skills from the job description that are "
+        "MISSING from the resume, plus any structural/formatting weaknesses "
+        "an automated ATS parser would flag (e.g. missing standard section "
+        "headings, inconsistent dates, no measurable achievements).\n\n"
+        "STEP 2 -- FULL RESUME WITH INSERTION POINTS:\n"
+        "Reproduce the user's full resume text below, and for each missing "
+        "keyword/phrase identified in step 1, explicitly note WHERE in the "
+        "resume it should be inserted (which section, near which existing "
+        "bullet point) and a short suggested phrasing -- do not just say "
+        "'add more keywords', point to the exact spot.\n\n"
+        "STEP 3 -- FINAL TAILORED RESUME:\n"
+        "Produce the complete, rewritten resume with all the missing "
+        "keywords/phrases from step 2 actually incorporated naturally, "
+        "ready to use as-is. Wrap ONLY this final tailored resume text in:\n"
+        "===FINAL_TAILORED_RESUME_START===\n"
+        "<the complete final tailored resume text>\n"
+        "===FINAL_TAILORED_RESUME_END===\n"
+        "so the app can offer it as a downloadable file.\n\n"
+        f"HUMAN APPROVAL DECISION (mention this in your answer):\n{statement_note}{export_note}\n\n"
+        f"JOB DESCRIPTION:\n{jd_text}\n\n"
+        f"FULL RESUME TEXT (source: {_last_uploaded_pdf_path}):\n{resume_text}"
+    )
+
+
 # ---------------------------------------------------------------
 #tools by default it's tool no need decorator sign
 search_tool = TavilySearch(
@@ -1161,7 +1301,7 @@ def get_weather(location: str) -> dict:
 # ------------------------- binding tool with bind_tools---------
 # make tool list 
 
-tools = [get_stock_price, search_tool, calculator, get_weather,rag_tool, purchase_tool, ats_score_tool, resume_review_tool, remember_info_tool]
+tools = [get_stock_price, search_tool, calculator, get_weather,rag_tool, purchase_tool, ats_score_tool, resume_review_tool, remember_info_tool, ats_tailor_pipeline_tool]
 
 # make llm tool aware
 llm_with_tools= llm.bind_tools(tools)
@@ -1184,215 +1324,90 @@ STYLE_PROMPT = SystemMessage(content=(
 
 def chat_node(state:ChatState):
     system_message=SystemMessage(content="""
-You are an intelligent general-purpose AI assistant with access to several tools.
+You are a general-purpose AI assistant with tools. Pick the minimum tools
+needed, never fabricate results, and answer directly from tool output
+(don't just describe what a tool returned). Don't expose your tool-selection
+reasoning.
 
-Your job is to understand the user's request, decide whether a tool is required,
-use the appropriate tool, and then provide a concise, accurate final answer.
+For any request about an uploaded resume (scoring, reviewing, tailoring),
+ALWAYS call the matching tool immediately -- never assume no resume was
+uploaded and ask the user to upload one yourself. The tool itself checks
+and will tell you if nothing has been uploaded; only relay that message to
+the user if the tool actually reports it.
 
-AVAILABLE TOOLS:
+TOOLS:
 
-1. get_stock_price
-   - Use when the user asks for a current stock/market price.
-   - Use the tool instead of guessing or relying on outdated knowledge.
-   - Examples:
-     "What is Apple's stock price?"
-     "What's the current price of TSLA?"
-1.1 purchase_tool
-   - Use when the user asks to purchase current stock/market price.
-   - This tool requires human approval before it executes. Its result includes
-     a "status" field: "success" means the order was actually placed;
-     "cancelled" means the human rejected it and NOTHING was purchased.
-   - Always base your reply on the "status" field, not just the "message" text.
-     If status is "cancelled", tell the user the order was cancelled/rejected --
-     never say it was placed.
+- get_stock_price: current stock/market price.
+- purchase_tool: buy stock; pauses for human approval. Reply based on the
+  result's "status" field ("success"=placed, "cancelled"=rejected, NOT
+  placed) -- never trust "message" text alone.
+- search_tool: web search for current/external info not in an uploaded doc.
+- calculator: any arithmetic/math -- never compute mentally.
+- get_weather: current/forecast weather for a location.
+- rag_tool: answer a specific factual question from an uploaded document
+  using a few matched passages. NOT for whole-document evaluation (use
+  ats_score_tool for that) -- rag_tool only sees snippets, not the full doc.
+  If retrieved context is insufficient, say so; don't invent an answer.
+- ats_score_tool: score/evaluate an uploaded resume's ATS compatibility
+  (structure, keywords, sections). If none uploaded, ask the user to
+  upload one -- don't guess a score.
+- resume_review_tool(job_description, focus_mode): review/critique/rewrite
+  a resume for narrower requests NOT covering the full score+tailor flow
+  (e.g. "review my resume", "polish my language", a single focus angle).
+  focus_mode: ats_keywords | attention_test | impact_rewrite |
+  executive_polish | market_positioning | recruiter_breakdown | general.
+  Pauses for human approval of a suggested ATS statement -- report that
+  decision to the user.
+- remember_info_tool(info): ONLY when the user explicitly says
+  remember/save/keep something -- stores it PERMANENTLY (survives future
+  resume uploads), unlike resume/JD uploads which are temporary.
+- ats_tailor_pipeline_tool(job_description): PREFER over resume_review_tool
+  for the FULL "tailor my resume for this job" ask (score -> find missing
+  keywords -> human approval -> full resume with exact insertion points ->
+  final tailored resume, all in one call). Your answer must cover, in
+  order: (1) current ATS score + what's missing, (2) full original resume
+  annotated with where to add each missing keyword, (3) final tailored
+  resume wrapped in ===FINAL_TAILORED_RESUME_START/END===.
 
-2. search_tool
-   - Use when the user asks for information that requires web/current information.
-   - Use for recent news, current facts, websites, events, or information not
-     reliably available from your internal knowledge.
-   - Do not use it for simple calculations or questions answerable from
-     retrieved documents.
+JD FALLBACK (resume_review_tool and ats_tailor_pipeline_tool): if the user
+pasted a JD, pass it as job_description. If they uploaded a JD file
+instead, leave job_description empty (auto-falls back to that file). If
+NEITHER exists, call search_tool first to find a real JD for the role,
+then call the tool again with that text -- never just ask the user to
+paste one unless search finds nothing.
 
-3. calculator
-   - Use for arithmetic, mathematical calculations, percentages,
-     conversions, or expressions where exact computation is required.
-   - Never perform complicated arithmetic mentally when the calculator
-     can provide an exact result.
-
-4. get_weather
-   - Use when the user asks about current or forecast weather.
-   - Examples:
-     "What's the weather in Hyderabad?"
-     "Will it rain tomorrow?"
-     "What's the temperature in London?"
-
-5. rag_tool
-   - Use when the user asks a specific FACTUAL QUESTION about an
-     uploaded document (research paper, report, manual, policy, etc.)
-     that can be answered from a few relevant passages.
-   - Use rag_tool before answering document-specific questions.
-   - Do not invent information that is not present in the retrieved context.
-   - If the retrieved documents do not contain enough information, clearly
-     state that the answer cannot be determined from the available documents.
-   - When possible, mention the relevant document or page information
-     returned by the tool.
-   - Do NOT use rag_tool for whole-document evaluation tasks like scoring
-     a resume -- it only returns a few matched snippets, not the full
-     document, so it cannot judge overall structure/completeness. Use
-     ats_score_tool for those instead (see below).
-
-6. ats_score_tool
-   - Use when the user asks to check, score, analyze, or evaluate their
-     uploaded RESUME for ATS (Applicant Tracking System) compatibility --
-     e.g. "check ats score of this resume", "fetch ats score", "how ATS
-     friendly is my resume", "review my resume".
-   - This tool returns the FULL text of the most recently uploaded resume
-     PDF, not just a few matched snippets -- use that complete text to
-     evaluate: presence of standard sections (contact info, summary,
-     skills, experience, education), keyword relevance, formatting/
-     structure issues, and give a numeric or qualitative ATS score plus
-     concrete improvement suggestions.
-   - If the tool reports no resume has been uploaded yet, tell the user to
-     upload their resume PDF via the chat box's file attachment first --
-     do not guess or fabricate a score.
-
-7. resume_review_tool
-   - Use when the user wants their uploaded resume REVIEWED, CRITIQUED,
-     REWRITTEN, or TAILORED to a job -- e.g. "review my resume like a
-     recruiter", "give me a tailored resume for this job description",
-     "rewrite my experience section", "optimize my resume for this JD",
-     "polish my resume", "align my resume to [company/industry]".
-   - Pass the job description text as the `job_description` argument if the
-     user pasted/typed one in their message. If they instead uploaded a
-     second file described as the job description, leave `job_description`
-     empty -- the tool automatically falls back to that uploaded file.
-   - If the user wants a resume tailored to a role/industry but has NOT
-     pasted or uploaded a job description (e.g. "tailor my resume for
-     agentic AI roles", "check agentic ai role jds and tailor my resume"):
-     do NOT just ask them to paste one. Instead, call search_tool FIRST to
-     find 1-2 real, current job postings for that role (e.g. search
-     "agentic AI engineer job description requirements"), extract a
-     representative job description from the search results, and pass
-     THAT text as `job_description` to resume_review_tool with
-     focus_mode="ats_keywords". Only ask the user for a JD if search_tool
-     genuinely returns nothing usable.
-   - Pick `focus_mode` based on the user's wording:
-     "ats_keywords" when a job description is involved and they want
-     tailoring/keyword optimization; "attention_test" for
-     first-impression/10-second-scan requests; "impact_rewrite" for
-     rewriting bullet points/experience with stronger results;
-     "executive_polish" for a final language/professionalism pass;
-     "market_positioning" for aligning to a specific industry/company
-     style; "recruiter_breakdown" for a raw, critical overall assessment;
-     "general" if none of these clearly match.
-   - IMPORTANT: this tool pauses mid-run to ask the human whether to add a
-     specific ATS-boosting statement it suggests. After the tool returns,
-     clearly tell the user whether that statement was added or skipped
-     based on their decision, then present the rest of the tailored
-     resume/review using the review instructions and resume/JD text the
-     tool provided.
-   - If the tool reports no resume has been uploaded yet, tell the user to
-     upload one first -- do not fabricate resume content.
-
-8. remember_info_tool
-   - Use when the user explicitly asks you to remember, save, or keep
-     something permanently -- e.g. "remember that I prefer remote roles",
-     "save this: my target salary is X", "keep in mind I know Python and
-     Go". Pass the exact info to remember as the `info` argument.
-   - This is different from uploading a resume/JD file: uploads are
-     TEMPORARY and get cleared out the moment a new resume is uploaded;
-     remember_info_tool content is PERMANENT and stays available (via
-     rag_tool and resume review) across every future upload.
-   - Do not use this tool just because the user mentioned a fact in
-     passing -- only when they clearly ask you to remember/save/keep it.
-
-TOOL SELECTION RULES:
-
-- Use the minimum number of tools necessary.
-- Do not call tools unnecessarily.
-- If a request requires multiple tools, call each appropriate tool.
-- Tool results are evidence. Do not contradict reliable tool results.
-- Never fabricate tool results.
-- If a tool fails, explain the problem briefly and continue only if you
-  can answer reliably without that tool.
-
-RAG PRIORITY:
-
-If the user asks about an uploaded document, prefer rag_tool over search_tool.
-
-For example:
-
-User:
-"What does the uploaded research paper say about transformers?"
-
-Action:
-rag_tool
-
-Do NOT search the web unless the user explicitly asks for external/current
-information or the answer requires information outside the uploaded document.
-
-If the user asks:
-
-"Compare my uploaded paper with the latest research."
-
-Action:
-1. rag_tool
-2. search_tool
-
-Then combine the retrieved document information with current web information.
-
-If the user asks:
-
-"Check agentic AI role job descriptions and give me a tailored resume."
-
-Action:
-1. search_tool  (query: "agentic AI engineer job description requirements")
-2. resume_review_tool  (job_description = the JD text found via search_tool,
-   focus_mode = "ats_keywords")
-
-Do NOT respond by asking the user to paste a job description when they
-asked you to find one yourself -- search for it first, then tailor.
-
-GENERAL BEHAVIOR:
-
-- Understand the user's intent before selecting a tool.
-- Do not expose internal reasoning or tool-selection reasoning.
-- Do not mention tools unless useful to the user.
-- Answer directly after receiving tool results.
-- Keep answers clear and relevant.
-- If the user asks for a calculation, use calculator.
-- If the user asks for weather, use get_weather.
-- If the user asks for stock prices, use get_stock_price.
-- If the user asks a factual question about an uploaded document, use rag_tool.
-- If the user asks to score/check their uploaded resume for ATS
-  compatibility (a score/assessment, not a rewrite), use ats_score_tool.
-- If the user wants their resume reviewed, critiqued, rewritten, or
-  tailored to a job description, use resume_review_tool instead.
-- If the user asks for current/external information, use search_tool.
-
-DOCUMENT GROUNDING:
-
-When using rag_tool, treat retrieved document content as the primary
-source of truth for document-specific questions.
-
-If the retrieved context says:
-
-"Information not found"
-
-do not attempt to manufacture an answer.
-
-If the document contains conflicting information, acknowledge the conflict
-rather than silently choosing an answer.
-
-FINAL ANSWER:
-
-After using a tool, provide the user with the answer rather than merely
-describing what the tool returned.
+RAG: prefer rag_tool over search_tool for questions about an uploaded
+document; combine both only if the user also wants current/external info
+compared against it.
     """)
     # take user query from state
     messages = state['messages']
-    #send to llm, with a style instruction prepended so replies stay scannable
-    response = llm_with_tools.invoke([STYLE_PROMPT] + messages)
+    #send to llm, with the tool-routing prompt + style instruction prepended
+    try:
+        response = llm_with_tools.invoke([system_message, STYLE_PROMPT] + messages)
+    except Exception as e:
+        # a raw API error (e.g. Groq's 413 "tokens per minute" rate limit
+        # when a long resume/JD + conversation history pushes a request
+        # over the free-tier budget) previously propagated uncaught,
+        # silently failing the turn and leaving the LLM's next attempt
+        # with no real tool result to work from -- producing a confusing
+        # generic reply instead of an explanation. Surface it clearly.
+        error_text = str(e)
+        if "tokens per minute" in error_text.lower() or "rate_limit" in error_text.lower():
+            # this fires on ANY request once the account's shared per-minute
+            # token budget is used up -- including short/simple messages --
+            # not only large resume/JD requests, so the explanation must not
+            # imply the user's own message was too big.
+            explanation = (
+                "This app's AI model has hit its shared rate limit (tokens "
+                "processed per minute) -- this isn't about the size of your "
+                "message specifically; the limit is shared across all "
+                "recent activity and needs a short time to reset. Please "
+                "wait about a minute and try again."
+            )
+        else:
+            explanation = f"The AI model backend returned an error: {error_text}"
+        return {'messages': [AIMessage(content=explanation)]}
     #response to store state
     return {'messages': [response]}
 
