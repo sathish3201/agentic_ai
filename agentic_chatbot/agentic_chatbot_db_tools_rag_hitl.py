@@ -17,6 +17,7 @@ import sqlite3
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
+from langchain_core.documents import Document
 # -------rag based system--------------
 from langchain_chroma import Chroma
 from langchain_community.embeddings import FastEmbedEmbeddings
@@ -130,6 +131,80 @@ def get_embedding_model():
     if _embedding_model is None:
         _embedding_model = FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')
     return _embedding_model
+
+
+# --------------------- chunk storage split: SQLite + Chroma ---------------
+# Chroma always stores whatever text you hand it alongside each vector (its
+# similarity_search returns that text directly) -- there's no "vectors only"
+# mode. To keep Chroma's own index smaller, we embed and store only a
+# SHORT/truncated form of each chunk there (enough for the embedding model
+# to place it well, and for a human-readable preview), while the FULL chunk
+# text lives in a separate SQLite table. Retrieval finds matching chunk IDs
+# via Chroma similarity search, then loads the full text for those IDs from
+# SQLite -- keeping Chroma's per-chunk payload small without losing any
+# content.
+_CHUNK_DB_PATH = "./resume_chunks.db"
+_CHROMA_PREVIEW_CHARS = 200  # how much of each chunk Chroma itself stores/embeds against
+
+
+def _get_chunk_db():
+    """Lazily opens the chunk-text SQLite connection and ensures the table
+    exists. Deferred (not opened at import time) for the same reason the
+    embedding model is lazy: keep baseline memory/handles low until a file
+    is actually uploaded."""
+    conn = sqlite3.connect(_CHUNK_DB_PATH, check_same_thread=False)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            chunk_id TEXT PRIMARY KEY,
+            source TEXT,
+            page INTEGER,
+            content TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def store_chunks(chunks):
+    """Persists the full text of each chunk in SQLite, keyed by a stable
+    chunk_id, and returns the list of chunk_ids in the same order -- used
+    both as the SQLite primary key and as the Chroma document id, so the
+    two stores can be joined by id."""
+    conn = _get_chunk_db()
+    chunk_ids = []
+    rows = []
+    for index, chunk in enumerate(chunks):
+        source = chunk.metadata.get("source", "")
+        page = chunk.metadata.get("page", index)
+        chunk_id = f"{source}::{page}::{index}"
+        chunk_ids.append(chunk_id)
+        rows.append((chunk_id, source, page, chunk.page_content))
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO chunks (chunk_id, source, page, content) VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return chunk_ids
+
+
+def load_chunk_texts(chunk_ids):
+    """Fetches full chunk text for the given ids from SQLite, returned as a
+    {chunk_id: text} dict."""
+    if not chunk_ids:
+        return {}
+    conn = _get_chunk_db()
+    placeholders = ",".join("?" for _ in chunk_ids)
+    rows = conn.execute(
+        f"SELECT chunk_id, content FROM chunks WHERE chunk_id IN ({placeholders})",
+        chunk_ids,
+    ).fetchall()
+    conn.close()
+    return dict(rows)
+
 
 # Tracks the most recently uploaded resume / job-description file paths --
 # used by ats_score_tool and resume_review_tool, which need the FULL
@@ -496,12 +571,40 @@ def ingest_rag_documents(file_path):
           f"(chunk_size={spliter._chunk_size}, overlap={spliter._chunk_overlap})")
 
     chunks = spliter.split_documents(docs)
+
+    # full chunk text -> SQLite; Chroma embeds/stores only a short preview
+    # per chunk (smaller index). chunk_id is stamped into each preview
+    # Document's metadata so any retrieval path (which only has public
+    # Chroma APIs available -- similarity_search etc. don't return raw ids)
+    # can still join back to the full text in SQLite.
+    chunk_ids = store_chunks(chunks)
+    preview_docs = [
+        Document(
+            page_content=chunk.page_content[:_CHROMA_PREVIEW_CHARS],
+            metadata={**chunk.metadata, "chunk_id": chunk_id},
+        )
+        for chunk, chunk_id in zip(chunks, chunk_ids)
+    ]
+
     vector_store = Chroma.from_documents(
-        documents = chunks,
+        documents = preview_docs,
         embedding = get_embedding_model(),
         collection_name='my_pdf_document',
-        persist_directory='./my_chroma_db'
+        persist_directory='./my_chroma_db',
+        ids = chunk_ids,
     )
+
+
+def _resolve_full_text(doc):
+    """Given a Document returned from Chroma (holding only a short preview
+    plus a chunk_id in its metadata), returns its full text from SQLite --
+    falling back to the preview if the chunk_id is missing/not found (e.g.
+    documents ingested before this split existed)."""
+    chunk_id = doc.metadata.get("chunk_id")
+    if not chunk_id:
+        return doc.page_content
+    full_texts = load_chunk_texts([chunk_id])
+    return full_texts.get(chunk_id, doc.page_content)
 
 
 def get_resume_context(queries, k_per_query=3):
@@ -510,8 +613,10 @@ def get_resume_context(queries, k_per_query=3):
     Chroma/embedding pipeline ingest_rag_documents() already builds --
     reusing chunking+embeddings instead of feeding the small local LLM the
     entire raw resume text, which was overflowing its effective context and
-    causing empty replies. Chunks are deduped and returned in resume page
-    order so the excerpt still reads coherently."""
+    causing empty replies. Chroma only holds short previews, so full chunk
+    text is looked up from SQLite via each Document's chunk_id. Chunks are
+    deduped and returned in resume page order so the excerpt still reads
+    coherently."""
     vector_store = Chroma(
         embedding_function=get_embedding_model(),
         collection_name='my_pdf_document',
@@ -521,11 +626,11 @@ def get_resume_context(queries, k_per_query=3):
     seen = {}
     for query in queries:
         for doc in vector_store.similarity_search(query, k=k_per_query):
-            key = (doc.metadata.get("page"), doc.page_content[:50])
+            key = doc.metadata.get("chunk_id") or (doc.metadata.get("page"), doc.page_content[:50])
             seen[key] = doc
 
     ordered = sorted(seen.values(), key=lambda d: d.metadata.get("page", 0))
-    return "\n\n".join(doc.page_content for doc in ordered)
+    return "\n\n".join(_resolve_full_text(doc) for doc in ordered)
 
 
 def set_last_uploaded_jd(file_path):
@@ -566,7 +671,7 @@ def rag_tool(query:str) -> str:
             f"Document: {index}\n"
             f"Source: {source}\n"
             f"Page: {page} \n"
-            f"Content: {document.page_content}"
+            f"Content: {_resolve_full_text(document)}"
         )
     return "\n\n".join(formatted_documents)
 
