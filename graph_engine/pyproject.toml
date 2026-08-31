@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graph-engine"
+version = "0.1.0"
+description = "Optimized, metaprogramming-driven graph workflow engine with dynamic CRUD and RBAC auth nodes"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = []
+
+[project.optional-dependencies]
+langgraph = [
+    "langgraph==1.2.11",
+    "langchain-core==1.5.6",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

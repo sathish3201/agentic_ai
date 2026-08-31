@@ -4,3 +4,15 @@ __pycache__/
 venv/
 .venv/
 *.ipynb
+
+# local runtime data / vector DB indexes -- regenerated on demand, not source
+*.db
+*.db-shm
+*.db-wal
+chroma.db/
+my_chroma_db/
+agentic_chatbot/my_chroma_db/
+*.pdf
+
+# Python packaging build artifacts (auto-generated, not source)
+*.egg-info/

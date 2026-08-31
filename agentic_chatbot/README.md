@@ -1,124 +1,123 @@
 # Agentic AI Chatbot
 
-A Streamlit chatbot built on LangGraph, backed by a local Ollama model exposed
-through a self-hosted OpenAI-compatible API (tunneled with ngrok), deployed on
-Render.
+A tool-calling chatbot built on LangGraph and Streamlit, with document upload
+(RAG), human-in-the-loop (HITL) approval for sensitive actions, resume/ATS
+tooling, and persistent multi-thread conversation history via SQLite.
+
+The current app is **`app_db_tools_rag_hitl.py`**, backed by
+**`agentic_chatbot_db_tools_rag_hitl.py`**.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Render["Render (agentic-chatbot)"]
-        UI["Streamlit app\n(app_thread.py / app_db.py)"]
-        Graph["LangGraph chat_node\n(agentic_chatbot.py /\nagentic_chatbot_db.py)"]
-        UI --> Graph
-    end
+    UI["Streamlit UI\napp_db_tools_rag_hitl.py"]
+    Graph["LangGraph chat_node + tools\nagentic_chatbot_db_tools_rag_hitl.py"]
+    UI --> Graph
 
-    subgraph Local["Local machine (LLM_WORK_SPACE/ollama-service)"]
-        Wrapper["FastAPI wrapper\n/v1/chat/completions\n(SSE streaming + cache)"]
-        Ollama["Ollama\nqwen2.5:3b"]
-        Wrapper --> Ollama
-    end
+    Groq["Groq API\n(openai/gpt-oss-20b)"]
+    Ollama["Local Ollama\n(qwen2.5:3b, dev fallback)"]
+    Graph -->|primary| Groq
+    Graph -.->|fallback if no GROQ_API_KEY| Ollama
 
-    Ngrok["ngrok tunnel\nbovine-cylinder-onboard.ngrok-free.dev"]
+    Chroma["Chroma vector store\nmy_chroma_db/"]
+    Graph --> Chroma
 
-    Graph -->|ChatOpenAI, stream=true| Ngrok --> Wrapper
-
-    Checkpoint["Checkpointer\nMemorySaver (app_thread)\nSqliteSaver -> chatbot.db (app_db)"]
+    Checkpoint["SqliteSaver\nchatbot.db"]
     Graph --- Checkpoint
 ```
 
-- **UI (Streamlit)**: renders chat bubbles, sidebar thread list, and streams
-  tokens as they arrive via `st.write_stream`.
-- **LangGraph**: a single-node graph (`chat_node`) that invokes the LLM and
-  appends the response to conversation state.
-- **Checkpointer**: `app_thread.py` uses an in-memory `MemorySaver` (state
-  lost on restart); `app_db.py` uses `SqliteSaver` against `chatbot.db`, so
-  conversations survive app restarts and can be listed via `get_all_threads()`.
-- **Model backend**: `ChatOpenAI` pointed at a local FastAPI wrapper
-  (`ollama-service/app.py`) that proxies an Ollama model, exposed to the
-  internet via a static ngrok domain. The deployed app therefore only answers
-  while the local machine, Ollama, and the ngrok tunnel are all running.
+- **UI (Streamlit)**: chat bubbles, sidebar thread list, file upload
+  (PDF/DOCX/TXT), streaming responses with live tool-progress status, and a
+  human-in-the-loop approve/reject panel for tools that pause mid-run.
+- **LangGraph**: a `chat_node` + `tools` graph (`tools_condition` routes
+  between them) with SQLite-backed checkpointing, so conversations and
+  in-progress HITL interrupts survive across turns and restarts.
+- **Model backend**: **Groq** (`openai/gpt-oss-20b`) is the primary LLM —
+  fast, and the only backend that works on a cloud host like Render, since
+  it needs no local model daemon. If `GROQ_API_KEY` isn't set/valid, the app
+  falls back to a local **Ollama** model (`qwen2.5:3b`) for offline dev use
+  only; this fallback does not work on Render.
+- **RAG / document tools**: uploaded resumes/documents are chunked with a
+  size-adaptive splitter (`pick_chunker_strategy` — small/medium/large/huge
+  tiers based on page count) and embedded into a local Chroma vector store
+  for retrieval.
+- **HITL**: sensitive or multi-step actions (stock purchases, adding an
+  ATS-boosting statement to a resume, choosing a docx/pdf export) pause the
+  graph via `interrupt()` and resume via `Command(resume=...)` once the user
+  clicks Approve/Reject in the UI. A small step registry
+  (`register_hitl_step`) lets one approval dynamically chain into the next
+  checkpoint instead of hardcoding a fixed sequence per tool.
+- **Progress/ETA reporting**: long-running tools report live "done / doing /
+  next / ETA" status via a registered stage list (`register_progress_stages`)
+  streamed to the UI through LangGraph's custom stream mode, so a slow tool
+  call shows real progress instead of an unexplained pause.
 
-## Build stages
+## Tools available to the model
 
-The project was built up in four stages, each adding one capability on top
-of the last.
+| Tool | Purpose |
+|---|---|
+| `get_stock_price` | Current stock price lookup (Alpha Vantage) |
+| `search_tool` | Web search (Tavily) |
+| `calculator` | Arithmetic evaluation |
+| `get_weather` | Current/forecast weather (Open-Meteo) |
+| `rag_tool` | Answers factual questions from an uploaded document |
+| `ats_score_tool` | Scores an uploaded resume for ATS compatibility |
+| `resume_review_tool` | Reviews/rewrites/tailors a resume to a job description (searches the web for a JD if none is given), with an HITL checkpoint before finalizing |
+| `purchase_tool` | Mock stock purchase, gated behind human approval (HITL) |
 
-### 1. Core chatbot on LangGraph
-- `53cb5aa` First version: a single-node LangGraph graph (`chat_node`) that
-  takes the conversation state, invokes an LLM (local Ollama or an
-  OpenAI-compatible endpoint via `ChatOpenAI`), and appends the response.
-  No UI yet — just the graph definition.
+## Setup
 
-### 2. Persistent (short-term) memory via checkpointing
-- Added a `MemorySaver` checkpointer so the graph remembers prior turns
-  within a `thread_id` — the graph looks up state by thread and appends new
-  messages rather than starting fresh each call.
-- `25741d3` Introduced multiple conversation threads: `app_thread.py` lets a
-  user switch between threads, each with its own `thread_id` and isolated
-  message history (still in-memory — lost on restart).
+### Requirements
+```bash
+pip install -r requirements.txt
+```
 
-### 3. User interface (Streamlit)
-- Built the Streamlit UI on top of the graph: chat bubbles, a text input,
-  and a sidebar listing all threads with a "New Chat" button
-  (`app_simple.py` → `app_thread.py`).
-- `40ee246` Made the app deployable: fixed model selection (`ChatOllama`
-  construction never actually failed, so it never fell back to the online
-  model — gated behind `USE_LOCAL_MODEL`) and filled in the real
-  `langgraph`/`langchain` dependencies in `requirements.txt`.
-- Deployed to **Render** (`agentic-chatbot`,
-  `https://agentic-chatbot-wah3.onrender.com`), running
-  `streamlit run agentic_chatbot/app_thread.py`.
-- `a6f2a09` → **streaming fix**: hit `ValueError: No generations found in
-  stream` in production — the local `ollama-service` wrapper always
-  returned one flat JSON body regardless of the `stream` flag, breaking
-  `ChatOpenAI`'s SSE parser. Implemented real SSE streaming in
-  `ollama-service/app.py` (proxies Ollama's streamed response as OpenAI-style
-  `data: {...}` chunks), then `b58189f` re-enabled streaming in the client.
-- `18b2ecc` / `0d0fc17` → UI polish: derived a short chat title from each
-  thread's first message instead of showing the raw UUID in the sidebar
-  (with a `st.rerun()` fix so it refreshes promptly), and added ChatGPT-style
-  message alignment (user right, assistant left) via CSS on Streamlit's
-  `data-testid` hooks.
+### Environment variables
 
-### 4. Long-term memory via SQLite
-- Added `agentic_chatbot_db.py` and `app_db.py`, swapping `MemorySaver` for
-  `SqliteSaver` against `chatbot.db`. Conversation state now survives app and
-  server restarts, and `get_all_threads()` reads every known thread straight
-  from the database to populate the sidebar — not just threads created in
-  the current session.
+Create a `.env` file in this folder (never commit it — see `.gitignore`):
 
-## Tests performed
+```env
+GROQ_API_KEY=your_groq_api_key      # required for the primary (fast) model
+TAVILY_API_KEY=your_tavily_api_key  # required for search_tool
+STOCK_API_KEY=your_alphavantage_key # required for get_stock_price
 
-- **Backend health check**: `curl https://bovine-cylinder-onboard.ngrok-free.dev/health`
-  → confirms the ngrok tunnel, FastAPI wrapper, and Ollama are all reachable
-  and lists available models.
-- **Non-streaming regression check**: `curl -X POST .../v1/chat/completions`
-  with `"stream": true` — reproduced the bug (server returned one flat JSON
-  object instead of SSE chunks), which is what led to the `ChatOpenAI`
-  streaming crash.
-- **Streaming fix verification**: re-ran the same curl after patching
-  `ollama-service/app.py` — confirmed proper `data: {...}` chunks per token
-  followed by `data: [DONE]`.
-- **Render deploy checks**: after every push, checked deploy status
-  (`build_in_progress` → `live`) and tailed build/app logs to catch install
-  or runtime errors early (e.g. the missing dependencies in
-  `requirements.txt`, and the streaming traceback).
-- **UI verification with Playwright**: launched the app locally
-  (`streamlit run app_thread.py`), drove a headless Chromium browser to
-  submit a real chat message, and inspected both the rendered DOM
-  (`data-testid="stChatMessage"` / `chatAvatarIcon-user"`) and a full-page
-  screenshot to confirm:
-  - user messages render right-aligned with the avatar on the right;
-    assistant messages stay left-aligned;
-  - the sidebar shows the derived chat title instead of the raw thread UUID
-    immediately after the first exchange.
+# optional: only used for local offline dev if Groq isn't configured
+# (requires Ollama running locally with `qwen2.5:3b` pulled)
+```
+
+Get a Groq key at [console.groq.com](https://console.groq.com).
+
+### Run locally
+```bash
+streamlit run app_db_tools_rag_hitl.py
+```
+
+## Deploying on Render
+
+1. Create a new **Web Service** on Render, pointed at this repo.
+2. **Build command**: `pip install -r agentic_chatbot/requirements.txt`
+3. **Start command**:
+   ```
+   streamlit run agentic_chatbot/app_db_tools_rag_hitl.py --server.port $PORT --server.address 0.0.0.0
+   ```
+4. **Environment variables** (Render dashboard → Environment, not `.env` —
+   `.env` is gitignored and won't exist on the deployed instance):
+   - `GROQ_API_KEY`
+   - `TAVILY_API_KEY`
+   - `STOCK_API_KEY`
+5. Deploy. Since Ollama cannot run on Render, `GROQ_API_KEY` **must** be set
+   and valid, or the app will fail to start (`No model is available.
+   Closing...`).
 
 ## Known limitations
 
-- The deployed app's model backend is a **local machine + ngrok tunnel**,
-  not a hosted service — chat requests fail whenever Ollama or the tunnel are
-  down.
-- `app_thread.py` keeps conversation history in memory only (lost on
-  restart); use `app_db.py` for persistence across restarts.
+- The local-Ollama fallback only works on a machine with Ollama installed
+  and running; it is unreachable on Render or any host without an Ollama
+  daemon.
+- The Chroma vector store (`my_chroma_db/`) is local disk storage — on
+  Render's ephemeral filesystem, uploaded documents/embeddings do not
+  persist across deploys or restarts.
+- `docx`/`pdf` export for tailored resumes is offered as a choice through
+  the HITL flow, but only the `.txt`/`.md` download is currently generated;
+  the docx/pdf file itself is not yet produced.

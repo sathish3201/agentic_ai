@@ -16,6 +16,12 @@ import sqlite3
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
+# -------rag based system--------------
+from langchain_chroma import Chroma
+from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+# ----------------------imports----------
 
 import requests
 import math
@@ -60,8 +66,8 @@ def online_model():
     return None
 
 # llm = online_model()
-# # if llm is None:
-# #     llm = laptop_model()
+# if llm is None:
+#     llm = laptop_model()
 
 llm = laptop_model()
 
@@ -69,8 +75,61 @@ llm = laptop_model()
 if llm == None:
     print("No model is available. Closing...")
     exit(1)
+# -------------------embeddings-----------
+embedding_model = FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')
+
+# -----------rag function for pdf file traverse-------------
+def ingest_rag_documents(file_path):
+    # DB_PATH = './chroma_db'
+    loader=PyPDFLoader(file_path)
+    docs = loader.load()
+    print(docs)
+    spliter = RecursiveCharacterTextSplitter(chunk_size= 1000, chunk_overlap= 200)
+    chunks = spliter.split_documents(docs)
+    vector_store = Chroma.from_documents(
+        documents = chunks,
+        embedding = embedding_model,
+        collection_name='my_pdf_document',
+        persist_directory='./my_chroma_db'
+    )
+
+# -------------retriving data-------------
+def get_retriever():
+    vector_store=Chroma(
+        embedding_function= embedding_model,
+        collection_name='my_pdf_document',
+        persist_directory='./my_chroma_db'
+    )
+    retriver = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': 4})
+    return retriver
 ############## ---tools #####################
 
+
+# --------------------------------Rag Tools-----------------
+@tool
+def rag_tool(query:str) -> str:
+    """ Retrieve relavant infromation from pdf documents 
+    use this tool when user ask the factual concept questions that may be answered using the stored PDF documents """
+    retriver = get_retriever()
+    documents = retriver.invoke(query)
+    if not documents:
+        return "No relavant information found in the PDF"
+
+    formatted_documents = []
+    for index, document in enumerate(documents, start=1):
+        source = document.metadata.get("source","unknown source")
+        page = document.metadata.get("page","unknown source")
+
+        formatted_documents.append(
+            f"Document: {index}\n"
+            f"Source: {source}\n"
+            f"Page: {page} \n"
+            f"Content: {document.page_content}"
+        )
+    return "\n\n".join(formatted_documents)
+
+
+# ---------------------------------------------------------------
 #tools by default it's tool no need decorator sign 
 search_tool = TavilySearch(
     max_results = 5,
@@ -110,6 +169,20 @@ def get_stock_price(symbol: str)-> dict:
     return r.json()  
 
 # ----------------------------------------------------------
+
+@tool 
+def purchase_tool(symbol:str, quantity:int) -> dict:
+    """ Simulate purchase a given quantity of a stock symbol
+    NOTE: tHIS IS MOCK IMPLEMENTATION 
+    - NO REAL BREAKAGE API CALLED
+    -IT SIMPLY RETURN CONFIRMATION PAYLOAD
+    """
+    return {
+        "status": "success",
+        "message":f"purchase order placed for {quantity} shares of symbol {symbol}",
+        "symbol":symbol,
+        "quantity": quantity
+    }
 # -------------------------- weather tool ---------------
 @tool
 def get_weather(location: str) -> dict:
@@ -179,7 +252,7 @@ def get_weather(location: str) -> dict:
 # ------------------------- binding tool with bind_tools---------
 # make tool list 
 
-tools = [get_stock_price, search_tool, calculator, get_weather]
+tools = [get_stock_price, search_tool, calculator, get_weather,rag_tool, purchase_tool]
 
 # make llm tool aware
 llm_with_tools= llm.bind_tools(tools)
@@ -201,6 +274,122 @@ STYLE_PROMPT = SystemMessage(content=(
 
 
 def chat_node(state:ChatState):
+    system_message=SystemMessage(content="""
+You are an intelligent general-purpose AI assistant with access to several tools.
+
+Your job is to understand the user's request, decide whether a tool is required,
+use the appropriate tool, and then provide a concise, accurate final answer.
+
+AVAILABLE TOOLS:
+
+1. get_stock_price
+   - Use when the user asks for a current stock/market price.
+   - Use the tool instead of guessing or relying on outdated knowledge.
+   - Examples:
+     "What is Apple's stock price?"
+     "What's the current price of TSLA?"
+1.1 purchase_tool
+   - Use when the user asks to purchase current stock/market price.
+
+2. search_tool
+   - Use when the user asks for information that requires web/current information.
+   - Use for recent news, current facts, websites, events, or information not
+     reliably available from your internal knowledge.
+   - Do not use it for simple calculations or questions answerable from
+     retrieved documents.
+
+3. calculator
+   - Use for arithmetic, mathematical calculations, percentages,
+     conversions, or expressions where exact computation is required.
+   - Never perform complicated arithmetic mentally when the calculator
+     can provide an exact result.
+
+4. get_weather
+   - Use when the user asks about current or forecast weather.
+   - Examples:
+     "What's the weather in Hyderabad?"
+     "Will it rain tomorrow?"
+     "What's the temperature in London?"
+
+5. rag_tool
+   - Use when the user asks questions about documents provided/uploaded
+     by the user.
+   - The documents may include PDFs, research papers, reports, manuals,
+     policies, or other indexed documents.
+   - Use rag_tool before answering document-specific questions.
+   - Do not invent information that is not present in the retrieved context.
+   - If the retrieved documents do not contain enough information, clearly
+     state that the answer cannot be determined from the available documents.
+   - When possible, mention the relevant document or page information
+     returned by the tool.
+
+TOOL SELECTION RULES:
+
+- Use the minimum number of tools necessary.
+- Do not call tools unnecessarily.
+- If a request requires multiple tools, call each appropriate tool.
+- Tool results are evidence. Do not contradict reliable tool results.
+- Never fabricate tool results.
+- If a tool fails, explain the problem briefly and continue only if you
+  can answer reliably without that tool.
+
+RAG PRIORITY:
+
+If the user asks about an uploaded document, prefer rag_tool over search_tool.
+
+For example:
+
+User:
+"What does the uploaded research paper say about transformers?"
+
+Action:
+rag_tool
+
+Do NOT search the web unless the user explicitly asks for external/current
+information or the answer requires information outside the uploaded document.
+
+If the user asks:
+
+"Compare my uploaded paper with the latest research."
+
+Action:
+1. rag_tool
+2. search_tool
+
+Then combine the retrieved document information with current web information.
+
+GENERAL BEHAVIOR:
+
+- Understand the user's intent before selecting a tool.
+- Do not expose internal reasoning or tool-selection reasoning.
+- Do not mention tools unless useful to the user.
+- Answer directly after receiving tool results.
+- Keep answers clear and relevant.
+- If the user asks for a calculation, use calculator.
+- If the user asks for weather, use get_weather.
+- If the user asks for stock prices, use get_stock_price.
+- If the user asks about uploaded documents, use rag_tool.
+- If the user asks for current/external information, use search_tool.
+
+DOCUMENT GROUNDING:
+
+When using rag_tool, treat retrieved document content as the primary
+source of truth for document-specific questions.
+
+If the retrieved context says:
+
+"Information not found"
+
+do not attempt to manufacture an answer.
+
+If the document contains conflicting information, acknowledge the conflict
+rather than silently choosing an answer.
+
+FINAL ANSWER:
+
+After using a tool, provide the user with the answer rather than merely
+describing what the tool returned.
+    """)
     # take user query from state
     messages = state['messages']
     #send to llm, with a style instruction prepended so replies stay scannable
