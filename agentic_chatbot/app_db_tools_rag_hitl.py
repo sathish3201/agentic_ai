@@ -1,4 +1,4 @@
-from agentic_chatbot_db_tools_rag_hitl import ingest_rag_documents,chatbot, get_all_threads, delete_thread,get_retriever, set_last_uploaded_jd
+from agentic_chatbot_db_tools_rag_hitl import ingest_rag_documents,chatbot, get_all_threads, delete_thread,get_retriever, set_last_uploaded_jd, ACTIVE_MODEL_INFO, is_embedding_model_loaded
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 import streamlit as st
 import uuid
@@ -299,6 +299,48 @@ add_thread(st.session_state['thread_id'])
 
 # ======= sidebar  threading feature title ==============================
 
+
+def render_model_status_indicator():
+    """Traffic-light status derived from what's actually happening in the
+    app right now -- NOT a separate health-check ping (no extra network
+    calls). Green = fast Groq backend, idle/ready. Yellow = the slow local
+    Ollama fallback is active, or a request is currently in flight. This
+    also explains WHY things are slow (free-tier RAM limits, embedding
+    model load time, small-model tradeoffs) instead of a bare spinner."""
+    busy = st.session_state.get('is_processing', False)
+
+    if ACTIVE_MODEL_INFO['is_slow_fallback']:
+        dot, label = "🟡", f"Slow local fallback: `{ACTIVE_MODEL_INFO['model_name']}` (Ollama)"
+    elif busy:
+        dot, label = "🟡", f"Working... `{ACTIVE_MODEL_INFO['model_name']}` (Groq)"
+    else:
+        dot, label = "🟢", f"Connected: `{ACTIVE_MODEL_INFO['model_name']}` (Groq)"
+
+    st.sidebar.markdown(f"{dot} {label}")
+
+    with st.sidebar.expander("ℹ️ Why is this sometimes slow?", expanded=False):
+        st.markdown(
+            "- Hosted on Render's **free tier (512MB RAM)** -- a small "
+            "budget shared by the whole app, the LLM client, and the "
+            "document-search tooling.\n"
+            "- The chat model itself (`openai/gpt-oss-20b` on Groq) is a "
+            "**small, low-token model chosen to fit that memory budget** "
+            "-- it trades some response depth for speed and a low memory "
+            "footprint.\n"
+            "- The **embedding model** used for resume/document search "
+            "only loads the **first time** you upload a file or ask a "
+            "document question in this session -- that first load can "
+            "take **up to ~1 minute** on the free tier. After that, it's "
+            "cached and stays fast for the rest of the session."
+        )
+        if not is_embedding_model_loaded():
+            st.caption("📦 Embedding model: not loaded yet (loads on first file upload/search).")
+        else:
+            st.caption("✅ Embedding model: already loaded and cached for this session.")
+
+
+render_model_status_indicator()
+
 st.sidebar.title("💬 My Conversations")
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
@@ -423,6 +465,8 @@ if st.session_state['pending_hitl']:
         # clear it now so a rerun mid-resume doesn't re-show stale buttons
         st.session_state['pending_hitl'] = None
 
+        st.session_state['is_processing'] = True
+
         with st.chat_message("assistant"):
 
             response_placeholder = st.empty()
@@ -498,6 +542,7 @@ if st.session_state['pending_hitl']:
                     {"role": "assistant", "content": resume_response}
                 )
 
+        st.session_state['is_processing'] = False
         st.rerun()
 
 user_input = st.chat_input(
@@ -526,10 +571,24 @@ if user_input:
         jd_keywords = ("job description", " jd ", " jd.", " jd,", "jd:", "job posting")
         is_jd_upload = any(kw in f" {user_message.lower()} " for kw in jd_keywords)
 
-        if is_jd_upload:
-            set_last_uploaded_jd(file_path)
-        else:
-            ingest_rag_documents(file_path)
+        # the FIRST upload/search in a process's lifetime has to load the
+        # embedding model (ONNX runtime + weights) -- on Render's free
+        # 512MB tier this can take up to ~1 minute, so tell the user why
+        # instead of leaving them looking at a bare spinner
+        embedding_already_loaded = is_embedding_model_loaded()
+        spinner_text = (
+            "Processing file..."
+            if embedding_already_loaded else
+            "Loading the document-search model for the first time (up to "
+            "~1 min on this free-tier server) -- subsequent uploads will "
+            "be much faster..."
+        )
+
+        with st.spinner(spinner_text):
+            if is_jd_upload:
+                set_last_uploaded_jd(file_path)
+            else:
+                ingest_rag_documents(file_path)
 
         # a user attaching a file with NO typed text is common (attach +
         # send). Leaving user_message empty here would mean: (1) nothing
@@ -581,6 +640,8 @@ if user_input:
     # -----------------------------------------------------
     # Assistant response
     # -----------------------------------------------------
+    st.session_state['is_processing'] = True
+
     with st.chat_message("assistant"):
 
         response_placeholder = st.empty()
@@ -724,6 +785,7 @@ if user_input:
                 "config": CONFIG,
             }
 
+            st.session_state['is_processing'] = False
             st.rerun()
 
         else:
@@ -731,6 +793,8 @@ if user_input:
             # =================================================
             # Normal completion
             # =================================================
+
+            st.session_state['is_processing'] = False
 
             status.update(
                 label="✅ Done",

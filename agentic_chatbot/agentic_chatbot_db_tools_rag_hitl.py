@@ -11,6 +11,7 @@ from langgraph.graph.message import add_messages
 import os
 from langchain_openai import ChatOpenAI
 import sqlite3
+import uuid
 
 
 #  tools--
@@ -107,8 +108,23 @@ def online_model():
 # local Ollama model only if Groq isn't configured/reachable (e.g. running
 # fully offline during local dev without a GROQ_API_KEY).
 llm = groq_model()
+
+# Exposed to the frontend so it can show which backend is actually active
+# (and whether it's the slow local-fallback path) via a status indicator,
+# instead of a generic spinner with no explanation.
+ACTIVE_MODEL_INFO = {
+    "backend": "groq",
+    "model_name": "openai/gpt-oss-20b",
+    "is_slow_fallback": False,
+}
+
 if llm is None:
     llm = laptop_model()
+    ACTIVE_MODEL_INFO = {
+        "backend": "ollama",
+        "model_name": "qwen2.5:3b",
+        "is_slow_fallback": True,
+    }
 
 
 if llm == None:
@@ -131,6 +147,13 @@ def get_embedding_model():
     if _embedding_model is None:
         _embedding_model = FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')
     return _embedding_model
+
+
+def is_embedding_model_loaded():
+    """Lets the frontend show a one-time 'loading the embedding model,
+    this can take ~1 minute on Render's free tier' explanation only on the
+    FIRST upload/RAG use in a process's lifetime, instead of every time."""
+    return _embedding_model is not None
 
 
 # --------------------- chunk storage split: SQLite + Chroma ---------------
@@ -159,36 +182,73 @@ def _get_chunk_db():
             chunk_id TEXT PRIMARY KEY,
             source TEXT,
             page INTEGER,
-            content TEXT
+            content TEXT,
+            scope TEXT NOT NULL DEFAULT 'temporary'
         )
         """
     )
+    # in case an older DB from before `scope` existed is still around
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()]
+    if "scope" not in cols:
+        conn.execute("ALTER TABLE chunks ADD COLUMN scope TEXT NOT NULL DEFAULT 'temporary'")
     conn.commit()
     return conn
 
 
-def store_chunks(chunks):
+def store_chunks(chunks, scope="temporary", id_prefix=""):
     """Persists the full text of each chunk in SQLite, keyed by a stable
     chunk_id, and returns the list of chunk_ids in the same order -- used
     both as the SQLite primary key and as the Chroma document id, so the
-    two stores can be joined by id."""
+    two stores can be joined by id.
+
+    `scope` is either "temporary" (the current resume upload -- cleared out
+    whenever a new resume is uploaded, keeping the single shared collection
+    from growing unbounded) or "permanent" (info the user explicitly asked
+    to remember via remember_info_tool, kept across uploads).
+    `id_prefix` disambiguates chunk_ids between temporary/permanent content
+    that might otherwise collide (e.g. same source path re-ingested)."""
     conn = _get_chunk_db()
     chunk_ids = []
     rows = []
     for index, chunk in enumerate(chunks):
         source = chunk.metadata.get("source", "")
         page = chunk.metadata.get("page", index)
-        chunk_id = f"{source}::{page}::{index}"
+        chunk_id = f"{id_prefix}{scope}::{source}::{page}::{index}"
         chunk_ids.append(chunk_id)
-        rows.append((chunk_id, source, page, chunk.page_content))
+        rows.append((chunk_id, source, page, chunk.page_content, scope))
 
     conn.executemany(
-        "INSERT OR REPLACE INTO chunks (chunk_id, source, page, content) VALUES (?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO chunks (chunk_id, source, page, content, scope) VALUES (?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()
     conn.close()
     return chunk_ids
+
+
+def delete_temporary_chunks():
+    """Removes all TEMPORARY chunks (the previously uploaded resume) from
+    both SQLite and the shared Chroma collection -- called right before
+    ingesting a newly uploaded resume, so the single collection holds only
+    the current resume's temporary data plus whatever permanent info has
+    been explicitly remembered, instead of accumulating every past upload
+    forever."""
+    conn = _get_chunk_db()
+    rows = conn.execute("SELECT chunk_id FROM chunks WHERE scope = 'temporary'").fetchall()
+    temp_ids = [row[0] for row in rows]
+    conn.execute("DELETE FROM chunks WHERE scope = 'temporary'")
+    conn.commit()
+    conn.close()
+
+    if temp_ids:
+        vector_store = Chroma(
+            embedding_function=get_embedding_model(),
+            collection_name='my_pdf_document',
+            persist_directory='./my_chroma_db',
+        )
+        vector_store.delete(ids=temp_ids)
+
+    return len(temp_ids)
 
 
 def load_chunk_texts(chunk_ids):
@@ -541,11 +601,13 @@ def report_progress(tool_name, stage_index):
     """Called from inside a tool to emit a live progress update for the
     given stage, via LangGraph's stream writer (stream_mode="custom").
     Safe to call even outside a streaming graph run (e.g. direct unit
-    tests / tool.invoke() calls) -- get_stream_writer() raises
-    RuntimeError in that case, which this simply swallows."""
+    tests / tool.invoke() calls) -- get_stream_writer() raises either
+    RuntimeError ("outside of a runnable context") or KeyError
+    ('__pregel_runtime' missing, e.g. when a tool is .invoke()'d directly
+    rather than run through chatbot.stream()) in that case, both swallowed."""
     try:
         writer = get_stream_writer()
-    except RuntimeError:
+    except (RuntimeError, KeyError):
         return
     writer({
         "progress_update": {
@@ -560,6 +622,15 @@ def report_progress(tool_name, stage_index):
 def ingest_rag_documents(file_path):
     global _last_uploaded_pdf_path
     _last_uploaded_pdf_path = file_path
+
+    # a new resume replaces the previous one -- clear out the old
+    # TEMPORARY chunks (from both SQLite and the shared Chroma collection)
+    # before ingesting, so the single collection doesn't accumulate every
+    # past upload forever. PERMANENT chunks (explicitly remembered via
+    # remember_info_tool) are untouched.
+    removed = delete_temporary_chunks()
+    if removed:
+        print(f"[chroma] cleared {removed} temporary chunk(s) from the previous resume")
 
     # DB_PATH = './chroma_db'
     loader=PyPDFLoader(file_path)
@@ -576,16 +647,21 @@ def ingest_rag_documents(file_path):
     # per chunk (smaller index). chunk_id is stamped into each preview
     # Document's metadata so any retrieval path (which only has public
     # Chroma APIs available -- similarity_search etc. don't return raw ids)
-    # can still join back to the full text in SQLite.
-    chunk_ids = store_chunks(chunks)
+    # can still join back to the full text in SQLite. Tagged "temporary" so
+    # the next upload's delete_temporary_chunks() call clears these back out.
+    chunk_ids = store_chunks(chunks, scope="temporary")
     preview_docs = [
         Document(
             page_content=chunk.page_content[:_CHROMA_PREVIEW_CHARS],
-            metadata={**chunk.metadata, "chunk_id": chunk_id},
+            metadata={**chunk.metadata, "chunk_id": chunk_id, "scope": "temporary"},
         )
         for chunk, chunk_id in zip(chunks, chunk_ids)
     ]
 
+    # single shared collection ("my_pdf_document") for everything --
+    # temporary and permanent chunks alike, distinguished only by the
+    # "scope" metadata/SQLite column, instead of creating/dropping a
+    # separate Chroma collection per upload.
     vector_store = Chroma.from_documents(
         documents = preview_docs,
         embedding = get_embedding_model(),
@@ -654,8 +730,44 @@ def get_retriever():
 
 # --------------------------------Rag Tools-----------------
 @tool
+def remember_info_tool(info: str) -> str:
+    """Use this when the user explicitly asks you to remember, save, or
+    keep some piece of information permanently -- e.g. "remember that I
+    prefer Python over Java", "save this for later: my target salary is
+    X", "keep in mind that I'm looking for remote roles only". Stores the
+    text as PERMANENT info in the shared document collection: unlike an
+    uploaded resume (which is TEMPORARY and gets cleared out the next time
+    a new resume is uploaded), permanent info stays available across future
+    uploads and is included whenever rag_tool/resume review look things up.
+    Do not use this for the resume/JD files themselves -- those are handled
+    by the file upload flow, not this tool."""
+    doc = Document(page_content=info, metadata={"source": "user_remembered_info"})
+    strategy_name, spliter = pick_chunker_strategy([doc])
+    chunks = spliter.split_documents([doc])
+
+    chunk_ids = store_chunks(chunks, scope="permanent", id_prefix=f"{uuid.uuid4()}::")
+    preview_docs = [
+        Document(
+            page_content=chunk.page_content[:_CHROMA_PREVIEW_CHARS],
+            metadata={**chunk.metadata, "chunk_id": chunk_id, "scope": "permanent"},
+        )
+        for chunk, chunk_id in zip(chunks, chunk_ids)
+    ]
+
+    Chroma.from_documents(
+        documents=preview_docs,
+        embedding=get_embedding_model(),
+        collection_name='my_pdf_document',
+        persist_directory='./my_chroma_db',
+        ids=chunk_ids,
+    )
+
+    return f"Remembered: \"{info}\" -- this will stay available across future uploads."
+
+
+@tool
 def rag_tool(query:str) -> str:
-    """ Retrieve relavant infromation from pdf documents 
+    """ Retrieve relavant infromation from pdf documents
     use this tool when user ask the factual concept questions that may be answered using the stored PDF documents """
     retriver = get_retriever()
     documents = retriver.invoke(query)
@@ -1049,7 +1161,7 @@ def get_weather(location: str) -> dict:
 # ------------------------- binding tool with bind_tools---------
 # make tool list 
 
-tools = [get_stock_price, search_tool, calculator, get_weather,rag_tool, purchase_tool, ats_score_tool, resume_review_tool]
+tools = [get_stock_price, search_tool, calculator, get_weather,rag_tool, purchase_tool, ats_score_tool, resume_review_tool, remember_info_tool]
 
 # make llm tool aware
 llm_with_tools= llm.bind_tools(tools)
@@ -1181,6 +1293,18 @@ AVAILABLE TOOLS:
      tool provided.
    - If the tool reports no resume has been uploaded yet, tell the user to
      upload one first -- do not fabricate resume content.
+
+8. remember_info_tool
+   - Use when the user explicitly asks you to remember, save, or keep
+     something permanently -- e.g. "remember that I prefer remote roles",
+     "save this: my target salary is X", "keep in mind I know Python and
+     Go". Pass the exact info to remember as the `info` argument.
+   - This is different from uploading a resume/JD file: uploads are
+     TEMPORARY and get cleared out the moment a new resume is uploaded;
+     remember_info_tool content is PERMANENT and stays available (via
+     rag_tool and resume review) across every future upload.
+   - Do not use this tool just because the user mentioned a fact in
+     passing -- only when they clearly ask you to remember/save/keep it.
 
 TOOL SELECTION RULES:
 
