@@ -507,21 +507,6 @@ if user_input:
     user_message = user_input.text
 
     # -----------------------------------------------------
-    # Save user message
-    # -----------------------------------------------------
-    set_thread_title_from_message(
-        st.session_state["thread_id"],
-        user_message
-    )
-
-    st.session_state["message_history"].append(
-        {
-            "role": "user",
-            "content": user_message,
-        }
-    )
-
-    # -----------------------------------------------------
     # Handle uploaded files
     # -----------------------------------------------------
     if user_input.files:
@@ -540,6 +525,34 @@ if user_input:
             set_last_uploaded_jd(file_path)
         else:
             ingest_rag_documents(file_path)
+
+        # a user attaching a file with NO typed text is common (attach +
+        # send). Leaving user_message empty here would mean: (1) nothing
+        # shows in the user's own chat bubble, and (2) the LLM gets an
+        # empty HumanMessage with no instruction, so it just asks "please
+        # share the file" again -- even though it was already ingested.
+        # Synthesize a concrete default message naming the actual file.
+        if not user_message.strip():
+            user_message = (
+                f"I've uploaded the job description file \"{uploaded_file.name}\"."
+                if is_jd_upload else
+                f"I've uploaded my resume \"{uploaded_file.name}\". Please review it."
+            )
+
+    # -----------------------------------------------------
+    # Save user message
+    # -----------------------------------------------------
+    set_thread_title_from_message(
+        st.session_state["thread_id"],
+        user_message
+    )
+
+    st.session_state["message_history"].append(
+        {
+            "role": "user",
+            "content": user_message,
+        }
+    )
 
     # -----------------------------------------------------
     # Display user message
