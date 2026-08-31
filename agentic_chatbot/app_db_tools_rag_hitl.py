@@ -433,13 +433,21 @@ if st.session_state['pending_hitl']:
                 for mode, chunk in chatbot.stream(
                     Command(resume=decision),
                     config=resume_config,
-                    stream_mode=["updates", "custom"],
+                    stream_mode=["messages", "updates", "custom"],
                 ):
 
                     if mode == "custom":
                         progress = chunk.get("progress_update")
                         if progress:
                             resume_status.update(label=progress["label"])
+                        continue
+
+                    if mode == "messages":
+                        message_chunk, _metadata = chunk
+                        if isinstance(message_chunk, AIMessage) and message_chunk.content:
+                            if isinstance(message_chunk.content, str):
+                                resume_response += message_chunk.content
+                                response_placeholder.markdown(resume_response + "▌")
                         continue
 
                     if "__interrupt__" in chunk:
@@ -467,6 +475,8 @@ if st.session_state['pending_hitl']:
                             }
                             break
 
+                    # AI text content now comes from the "messages" branch
+                    # above; this loop is only used for ToolMessage status.
                     for node_name, node_update in chunk.items():
 
                         if not isinstance(node_update, dict):
@@ -476,12 +486,7 @@ if st.session_state['pending_hitl']:
 
                         for message in messages:
 
-                            if isinstance(message, AIMessage):
-                                if message.content and isinstance(message.content, str):
-                                    resume_response += message.content
-                                    response_placeholder.markdown(resume_response + "▌")
-
-                            elif isinstance(message, ToolMessage):
+                            if isinstance(message, ToolMessage):
                                 resume_status.update(label=f"✅ `{message.name}` completed")
 
                 resume_status.update(label="✅ Done", state="complete", expanded=False)
@@ -597,6 +602,10 @@ if user_input:
             # dynamic progress-stage registry). With multiple stream
             # modes, each item is a (mode_name, payload) tuple.
             # -------------------------------------------------
+            # "messages" gives real token-by-token streaming (AIMessageChunk
+            # per token) -- without it, only "updates" is seen, which only
+            # delivers each node's COMPLETE output after it finishes, so the
+            # whole response appears at once instead of streaming in live.
             for mode, chunk in chatbot.stream(
                 {
                     "messages": [
@@ -604,13 +613,22 @@ if user_input:
                     ]
                 },
                 config=CONFIG,
-                stream_mode=["updates", "custom"],
+                stream_mode=["messages", "updates", "custom"],
             ):
 
                 if mode == "custom":
                     progress = chunk.get("progress_update")
                     if progress:
                         status.update(label=progress["label"])
+                    continue
+
+                if mode == "messages":
+                    # chunk is (message_chunk, metadata) for "messages" mode
+                    message_chunk, _metadata = chunk
+                    if isinstance(message_chunk, AIMessage) and message_chunk.content:
+                        if isinstance(message_chunk.content, str):
+                            full_response += message_chunk.content
+                            response_placeholder.markdown(full_response + "▌")
                     continue
 
                 # ---------------------------------------------
@@ -633,7 +651,10 @@ if user_input:
                         break
 
                 # ---------------------------------------------
-                # Process graph updates
+                # Process graph updates -- only used for tool-call status
+                # and ToolMessage events here; AI text content now comes
+                # from the "messages" branch above instead, to avoid
+                # double-appending the same content from both modes.
                 # ---------------------------------------------
                 for node_name, node_update in chunk.items():
 
@@ -658,17 +679,6 @@ if user_input:
 
                                     status.update(
                                         label=f"🔎 Starting `{tool_name}`..."
-                                    )
-
-                            # Normal AI content
-                            if message.content:
-
-                                if isinstance(message.content, str):
-
-                                    full_response += message.content
-
-                                    response_placeholder.markdown(
-                                        full_response + "▌"
                                     )
 
                         # -----------------------------
