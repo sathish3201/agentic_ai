@@ -114,7 +114,22 @@ if llm == None:
     print("No model is available. Closing...")
     exit(1)
 # -------------------embeddings-----------
-embedding_model = FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')
+# Lazily constructed: FastEmbedEmbeddings pulls in onnxruntime and downloads/
+# loads the model weights on first use, which is a real memory spike. On
+# Render's free 512MB tier, doing that at import time means the process is
+# already carrying that weight before a single request even arrives, leaving
+# less headroom for the actual embedding work during a file upload (which is
+# what pushed memory to ~530MB and got the process OOM-killed). Deferring
+# construction to the first actual call means idle memory stays lower, and
+# the model loads only once (cached) after that.
+_embedding_model = None
+
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = FastEmbedEmbeddings(model_name='BAAI/bge-small-en-v1.5')
+    return _embedding_model
 
 # Tracks the most recently uploaded resume / job-description file paths --
 # used by ats_score_tool and resume_review_tool, which need the FULL
@@ -483,7 +498,7 @@ def ingest_rag_documents(file_path):
     chunks = spliter.split_documents(docs)
     vector_store = Chroma.from_documents(
         documents = chunks,
-        embedding = embedding_model,
+        embedding = get_embedding_model(),
         collection_name='my_pdf_document',
         persist_directory='./my_chroma_db'
     )
@@ -498,7 +513,7 @@ def get_resume_context(queries, k_per_query=3):
     causing empty replies. Chunks are deduped and returned in resume page
     order so the excerpt still reads coherently."""
     vector_store = Chroma(
-        embedding_function=embedding_model,
+        embedding_function=get_embedding_model(),
         collection_name='my_pdf_document',
         persist_directory='./my_chroma_db',
     )
@@ -523,7 +538,7 @@ def set_last_uploaded_jd(file_path):
 # -------------retriving data-------------
 def get_retriever():
     vector_store=Chroma(
-        embedding_function= embedding_model,
+        embedding_function= get_embedding_model(),
         collection_name='my_pdf_document',
         persist_directory='./my_chroma_db'
     )
