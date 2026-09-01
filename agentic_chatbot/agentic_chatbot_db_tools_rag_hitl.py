@@ -1238,17 +1238,27 @@ def get_weather(location: str) -> dict:
     """Get current weather (temp, humidity, wind) for a city, e.g. "Hyderabad, India"."""
 
     # 1. Geocode location -> latitude/longitude
-    geo_response = requests.get(
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={
-            "name": location,
-            "count": 1,
-            "language": "en",
-            "format": "json",
-        },
-        timeout=10,
-    )
-    geo_response.raise_for_status()
+    try:
+        geo_response = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={
+                "name": location,
+                "count": 1,
+                "language": "en",
+                "format": "json",
+            },
+            timeout=10,
+        )
+        geo_response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        # Open-Meteo's free public API has its own separate rate limit --
+        # unrelated to the chat model's -- and can occasionally return 429
+        # under bursty traffic. Report it gracefully instead of letting the
+        # tool call crash.
+        return {
+            "success": False,
+            "error": f"Weather service is temporarily unavailable ({e}). Please try again shortly.",
+        }
 
     geo_data = geo_response.json()
 
@@ -1264,24 +1274,30 @@ def get_weather(location: str) -> dict:
     longitude = place["longitude"]
 
     # 2. Get current weather
-    weather_response = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": ",".join([
-                "temperature_2m",
-                "relative_humidity_2m",
-                "apparent_temperature",
-                "precipitation",
-                "weather_code",
-                "wind_speed_10m",
-            ]),
-            "timezone": "auto",
-        },
-        timeout=10,
-    )
-    weather_response.raise_for_status()
+    try:
+        weather_response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": ",".join([
+                    "temperature_2m",
+                    "relative_humidity_2m",
+                    "apparent_temperature",
+                    "precipitation",
+                    "weather_code",
+                    "wind_speed_10m",
+                ]),
+                "timezone": "auto",
+            },
+            timeout=10,
+        )
+        weather_response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "error": f"Weather service is temporarily unavailable ({e}). Please try again shortly.",
+        }
 
     weather_data = weather_response.json()
 
